@@ -176,11 +176,11 @@ export default function ClassificationPage() {
             let arrowsShot = 0;
 
             for (const [endNumber, arrows] of endMap.entries()) {
-                const endTotal = arrows.reduce((sum, s) => sum + (s === 11 ? 10 : s), 0);
+                const endTotal = arrows.reduce((sum: number, s: number | null) => sum + (s === 11 ? 10 : (s ?? 0)), 0);
                 endScores.push({ endNumber, arrows, total: endTotal });
                 totalScore += endTotal;
-                xCount += arrows.filter(s => s === 11).length;
-                tenPlusXCount += arrows.filter(s => s === 10 || s === 11).length;
+                xCount += arrows.filter((s: number | null) => s === 11).length;
+                tenPlusXCount += arrows.filter((s: number | null) => s === 10 || s === 11).length;
                 arrowsShot += arrows.length;
             }
 

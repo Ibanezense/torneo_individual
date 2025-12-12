@@ -136,7 +136,7 @@ export function SetScorer({ match, onMatchUpdate }: SetScorerProps) {
     };
 
     const calculateSetTotal = (arrows: (number | null)[]) => {
-        return arrows.reduce((sum, val) => {
+        return arrows.reduce((sum: number, val: number | null) => {
             if (val === null) return sum;
             return sum + (val === 11 ? 10 : val);
         }, 0) || 0;

@@ -117,12 +117,12 @@ export default function LiveClassificationPage() {
             let arrowsShot = 0;
 
             for (const [endNumber, arrows] of endMap.entries()) {
-                const validArrows = arrows.filter((a): a is number => a !== null && a !== undefined);
-                const endTotal = validArrows.reduce((sum, s) => sum + (s === 11 ? 10 : s), 0);
+                const validArrows = arrows.filter((a: number | null | undefined): a is number => a !== null && a !== undefined);
+                const endTotal = validArrows.reduce((sum: number, s: number) => sum + (s === 11 ? 10 : s), 0);
                 endScores.push({ endNumber, arrows, total: endTotal });
                 totalScore += endTotal;
-                xCount += validArrows.filter(s => s === 11).length;
-                tenPlusXCount += validArrows.filter(s => s === 10 || s === 11).length;
+                xCount += validArrows.filter((s: number) => s === 11).length;
+                tenPlusXCount += validArrows.filter((s: number) => s === 10 || s === 11).length;
                 arrowsShot += validArrows.length;
             }
 

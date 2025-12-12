@@ -90,7 +90,14 @@ export function useRealtimeTargets(tournamentId: string) {
             if (!assignmentsByTarget.has(assignment.target_id)) {
                 assignmentsByTarget.set(assignment.target_id, []);
             }
-            assignmentsByTarget.get(assignment.target_id)!.push(assignment as Assignment);
+            // Supabase returns nested selects as arrays, extract first item
+            const archerData = Array.isArray(assignment.archer) ? assignment.archer[0] : assignment.archer;
+            assignmentsByTarget.get(assignment.target_id)!.push({
+                id: assignment.id,
+                target_id: assignment.target_id,
+                is_finished: assignment.is_finished,
+                archer: archerData || { first_name: '', last_name: '' }
+            });
         }
 
         // 6. Calculate target statuses
