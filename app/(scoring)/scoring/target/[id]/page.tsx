@@ -1,15 +1,29 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Loader2, Target, CheckCircle2, FileText, NotebookText } from "lucide-react";
+import { Loader2, CheckCircle2, NotebookText } from "lucide-react";
 import { toast } from "sonner";
-import { CATEGORY_LABELS } from "@/lib/constants/categories";
-import type { AgeCategory } from "@/types/database";
+
+interface ArcherRow {
+    id: string;
+    first_name: string;
+    last_name: string;
+    age_category: string;
+    club: string | null;
+}
+
+interface AssignmentRow {
+    id: string;
+    position: string;
+    turn: string;
+    current_end: number;
+    is_finished: boolean;
+    archer: ArcherRow | ArcherRow[] | null;
+}
 
 interface ArcherAssignment {
     id: string;
@@ -50,11 +64,7 @@ export default function TargetScoringPage() {
     const [isLoading, setIsLoading] = useState(true);
     const [targetData, setTargetData] = useState<TargetData | null>(null);
 
-    useEffect(() => {
-        fetchTargetData();
-    }, [targetId]);
-
-    const fetchTargetData = async () => {
+    const fetchTargetData = useCallback(async () => {
         setIsLoading(true);
 
         // Fetch target with tournament
@@ -92,7 +102,8 @@ export default function TargetScoringPage() {
             .order("position");
 
         // Fetch all scores for all assignments
-        const assignmentIds = assignments?.map(a => a.id) || [];
+        const assignmentRows = (assignments || []) as AssignmentRow[];
+        const assignmentIds = assignmentRows.map((assignment) => assignment.id);
         const { data: allScores } = await supabase
             .from("qualification_scores")
             .select("assignment_id, end_number, arrow_number, score")
@@ -115,8 +126,8 @@ export default function TargetScoringPage() {
         }
 
         // Build result
-        const archerAssignments: ArcherAssignment[] = (assignments || []).map(a => {
-            const assignmentScores = scoresByAssignment.get(a.id) || new Map();
+        const archerAssignments: ArcherAssignment[] = assignmentRows.map((assignment) => {
+            const assignmentScores = scoresByAssignment.get(assignment.id) || new Map();
             const scoresArray: number[][] = [];
             let totalScore = 0;
 
@@ -126,12 +137,18 @@ export default function TargetScoringPage() {
             }
 
             return {
-                id: a.id,
-                position: a.position,
-                turn: a.turn,
-                current_end: a.current_end || 1,
-                is_finished: a.is_finished || false,
-                archer: a.archer as any,
+                id: assignment.id,
+                position: assignment.position,
+                turn: assignment.turn,
+                current_end: assignment.current_end || 1,
+                is_finished: assignment.is_finished || false,
+                archer: (Array.isArray(assignment.archer) ? assignment.archer[0] : assignment.archer) || {
+                    id: "",
+                    first_name: "Arquero",
+                    last_name: "",
+                    age_category: "open",
+                    club: null,
+                },
                 scores: scoresArray, // Index is EndNumber - 1
                 totalScore,
             };
@@ -146,7 +163,15 @@ export default function TargetScoringPage() {
         });
 
         setIsLoading(false);
-    };
+    }, [supabase, targetId]);
+
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            void fetchTargetData();
+        }, 0);
+
+        return () => clearTimeout(timer);
+    }, [fetchTargetData]);
 
     const handleArcherClick = (assignmentId: string) => {
         router.push(`/scoring/${assignmentId}?targetId=${targetId}`);

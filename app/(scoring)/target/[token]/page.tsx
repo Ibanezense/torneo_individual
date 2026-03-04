@@ -41,8 +41,7 @@ export default function TargetScoringPage() {
                 .select(`
           *,
           archer:archers(*),
-          target:targets(*),
-          target:targets(tournament:tournaments(*))
+          target:targets(*, tournament:tournaments(*))
         `)
                 .eq("access_token", token)
                 .single();
@@ -53,8 +52,8 @@ export default function TargetScoringPage() {
                 return;
             }
 
-            const targetData = assignmentData.target as any;
-            const tournamentData = targetData.tournament as Tournament;
+            const targetData = assignmentData.target as Target & { tournament: Tournament };
+            const tournamentData = targetData.tournament;
 
             setTarget(targetData);
             setTournament(tournamentData);
@@ -76,19 +75,20 @@ export default function TargetScoringPage() {
             }
 
             // Get scores for all assignments
-            const assignmentIds = allAssignments.map((a) => a.id);
+            const assignmentRows = (allAssignments || []) as (Assignment & { archer: Archer })[];
+            const assignmentIds = assignmentRows.map((assignment) => assignment.id);
             const { data: scoresData } = await supabase
                 .from("qualification_scores")
                 .select("*")
                 .in("assignment_id", assignmentIds);
 
-            const archersData: ArcherData[] = allAssignments.map((assignment) => {
-                const scores = (scoresData || []).filter(
-                    (s) => s.assignment_id === assignment.id
+            const archersData: ArcherData[] = assignmentRows.map((assignment) => {
+                const scores = ((scoresData || []) as QualificationScore[]).filter(
+                    (score) => score.assignment_id === assignment.id
                 );
                 return {
-                    assignment: assignment as Assignment,
-                    archer: assignment.archer as Archer,
+                    assignment,
+                    archer: assignment.archer,
                     scores,
                     currentEndScores: Array(tournamentData.arrows_per_end).fill(null),
                 };
@@ -104,6 +104,17 @@ export default function TargetScoringPage() {
     const handleScoreChange = (archerIndex: number, arrowIndex: number, score: number | null) => {
         setArchers((prev) => {
             const updated = [...prev];
+            const currentScore = updated[archerIndex].currentEndScores[arrowIndex];
+            const isFinished = updated[archerIndex].assignment.is_finished;
+
+            if (isFinished) {
+                return prev;
+            }
+
+            if (score !== null && currentScore !== null) {
+                return prev;
+            }
+
             updated[archerIndex] = {
                 ...updated[archerIndex],
                 currentEndScores: updated[archerIndex].currentEndScores.map((s, i) =>
@@ -116,7 +127,17 @@ export default function TargetScoringPage() {
 
     const handleConfirmEnd = async (archerIndex: number) => {
         const archerData = archers[archerIndex];
+        if (archerData.assignment.is_finished) {
+            toast.error("Solo el admin puede modificar una clasificatoria terminada");
+            return;
+        }
         const endNumber = archerData.assignment.current_end + 1;
+        const endsPerRound =
+            tournament?.ends_per_round && tournament.ends_per_round > 0
+                ? tournament.ends_per_round
+                : Math.max(1, Math.ceil(tournament!.qualification_arrows / tournament!.arrows_per_end));
+        const roundNumber = Math.floor((endNumber - 1) / endsPerRound) + 1;
+        const endInRound = ((endNumber - 1) % endsPerRound) + 1;
 
         // Validate all arrows have scores
         if (archerData.currentEndScores.some((s) => s === null)) {
@@ -128,6 +149,8 @@ export default function TargetScoringPage() {
             // Insert scores
             const scoresToInsert = archerData.currentEndScores.map((score, i) => ({
                 assignment_id: archerData.assignment.id,
+                round_number: roundNumber,
+                end_in_round: endInRound,
                 end_number: endNumber,
                 arrow_number: i + 1,
                 score,
@@ -145,13 +168,20 @@ export default function TargetScoringPage() {
                 0
             );
 
-            const { error: endError } = await supabase.from("qualification_ends").insert({
-                assignment_id: archerData.assignment.id,
-                end_number: endNumber,
-                end_total: endTotal,
-                is_confirmed: true,
-                confirmed_at: new Date().toISOString(),
-            });
+            const { error: endError } = await supabase
+                .from("qualification_ends")
+                .upsert(
+                    {
+                        assignment_id: archerData.assignment.id,
+                        round_number: roundNumber,
+                        end_in_round: endInRound,
+                        end_number: endNumber,
+                        end_total: endTotal,
+                        is_confirmed: true,
+                        confirmed_at: new Date().toISOString(),
+                    },
+                    { onConflict: "assignment_id,round_number,end_in_round" }
+                );
 
             if (endError) throw endError;
 
@@ -200,8 +230,9 @@ export default function TargetScoringPage() {
 
             setCurrentArrowIndex(0);
             toast.success(`Ronda ${endNumber} confirmada`);
-        } catch (error: any) {
-            toast.error("Error al guardar", { description: error.message });
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : "Error interno";
+            toast.error("Error al guardar", { description: message });
         }
     };
 
@@ -260,7 +291,7 @@ export default function TargetScoringPage() {
                 </TabsList>
 
                 <TabsContent value="AB" className="space-y-4 mt-4">
-                    {turnArchers.AB.map((data, idx) => {
+                    {turnArchers.AB.map((data) => {
                         const globalIndex = archers.findIndex(
                             (a) => a.assignment.id === data.assignment.id
                         );
@@ -286,7 +317,7 @@ export default function TargetScoringPage() {
                 </TabsContent>
 
                 <TabsContent value="CD" className="space-y-4 mt-4">
-                    {turnArchers.CD.map((data, idx) => {
+                    {turnArchers.CD.map((data) => {
                         const globalIndex = archers.findIndex(
                             (a) => a.assignment.id === data.assignment.id
                         );

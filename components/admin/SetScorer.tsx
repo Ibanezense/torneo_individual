@@ -1,250 +1,204 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Trophy, ArrowRight, Save, Loader2, AlertTriangle, Delete } from "lucide-react";
+import { Card, CardContent } from "@/components/ui/card";
+import { Check, Eraser, Loader2, Trophy } from "lucide-react";
 import { toast } from "sonner";
-import { cn } from "@/lib/utils";
-import type { EliminationMatchWithArchers, Set as MatchSet } from "@/types/database";
 import { createClient } from "@/lib/supabase/client";
+import { SET_SYSTEM } from "@/lib/constants/world-archery";
+import { resolvePendingByeAdvances } from "@/lib/utils/elimination-advancement";
+import type { EliminationMatchWithArchers, Set as MatchSet } from "@/types/database";
 
 interface SetScorerProps {
     match: EliminationMatchWithArchers;
     onMatchUpdate: (match: EliminationMatchWithArchers) => void;
 }
 
+const KEYPAD_COLORS: Record<string, string> = {
+    X: "bg-[#FFE55C] text-black border-[#E6CE45]",
+    "10": "bg-[#FFE55C] text-black border-[#E6CE45]",
+    "9": "bg-[#FFE55C] text-black border-[#E6CE45]",
+    "8": "bg-[#FF5C5C] text-white border-[#E64545]",
+    "7": "bg-[#FF5C5C] text-white border-[#E64545]",
+    "6": "bg-[#5C9DFF] text-white border-[#4589E6]",
+    "5": "bg-[#5C9DFF] text-white border-[#4589E6]",
+    "4": "bg-slate-900 text-white border-black",
+    "3": "bg-slate-900 text-white border-black",
+    "2": "bg-slate-200 text-black border-slate-300",
+    "1": "bg-slate-200 text-black border-slate-300",
+    M: "bg-slate-200 text-slate-500 border-slate-300",
+};
+
+const KEYPAD_LAYOUT = [["X", "10", "9"], ["8", "7", "6"], ["5", "4", "3"], ["2", "1", "M"]];
+
+const displayScore = (score: number | null) => {
+    if (score === null) return "";
+    if (score === 11) return "X";
+    if (score === 0) return "M";
+    return String(score);
+};
+
+const scoreValue = (score: number | null) => (score === null ? 0 : score === 11 ? 10 : score);
+
+const getArrowColor = (score: number | null, active: boolean) => {
+    const ring = active ? " ring-2 ring-sky-500 ring-offset-1 scale-[1.02]" : "";
+    if (score === null) return `bg-slate-100 text-slate-400 ring-1 ring-slate-200${ring}`;
+    if (score === 11 || score === 10 || score === 9) return `bg-yellow-300 text-slate-900${ring}`;
+    if (score === 8 || score === 7) return `bg-red-500 text-white${ring}`;
+    if (score === 6 || score === 5) return `bg-sky-400 text-white${ring}`;
+    if (score === 4 || score === 3) return `bg-slate-700 text-white${ring}`;
+    if (score === 2 || score === 1) return `bg-white text-slate-800 ring-1 ring-slate-300${ring}`;
+    return `bg-slate-200 text-slate-500${ring}`;
+};
+
+const cloneArrows = (values?: number[], size = 3) =>
+    Array.from({ length: size }, (_, index) => values?.[index] ?? null);
+
 export function SetScorer({ match, onMatchUpdate }: SetScorerProps) {
     const supabase = createClient();
-    const [isLoading, setIsLoading] = useState(false);
+    const [isLoading, setIsLoading] = useState(true);
+    const [isSaving, setIsSaving] = useState(false);
     const [sets, setSets] = useState<MatchSet[]>([]);
-
-    // Scoring state
     const [currentSetNumber, setCurrentSetNumber] = useState(1);
-    const [activeArcher, setActiveArcher] = useState<"archer1" | "archer2">("archer1");
-    // Arrows for current input only
     const [archer1Arrows, setArcher1Arrows] = useState<(number | null)[]>([null, null, null]);
     const [archer2Arrows, setArcher2Arrows] = useState<(number | null)[]>([null, null, null]);
+    const [activeArcher, setActiveArcher] = useState<1 | 2>(1);
+    const [activeCursor, setActiveCursor] = useState(0);
+    const [shootOffWinner, setShootOffWinner] = useState<1 | 2 | null>(null);
 
-    // Shootoff state
-    const [shootoffArcher1Arrow, setShootoffArcher1Arrow] = useState<number | null>(null);
-    const [shootoffArcher2Arrow, setShootoffArcher2Arrow] = useState<number | null>(null);
-    const [shootoffArcher1Distance, setShootoffArcher1Distance] = useState("");
-    const [shootoffArcher2Distance, setShootoffArcher2Distance] = useState("");
-    const [shootoffPhase, setShootoffPhase] = useState<"arrows" | "distance" | "confirm">("arrows");
+    const isShootOff = match.status === "shootoff";
+    const isCompleted = match.status === "completed";
+    const arrowSlots = isShootOff ? 1 : 3;
 
-    const isMatchComplete = match.status === "completed";
-    const isShootoff = match.status === "shootoff";
+    const confirmedSets = useMemo(
+        () =>
+            sets
+                .filter((setRow) => setRow.is_confirmed && !setRow.is_shootoff)
+                .sort((a, b) => a.set_number - b.set_number),
+        [sets]
+    );
+
+    const shootOffSet = useMemo(
+        () => sets.find((setRow) => setRow.is_shootoff || setRow.set_number === 99) || null,
+        [sets]
+    );
 
     useEffect(() => {
-        fetchSets();
-    }, [match.id]);
+        let cancelled = false;
 
-    const fetchSets = async () => {
-        const { data } = await supabase
-            .from("sets")
-            .select("*")
-            .eq("match_id", match.id)
-            .order("set_number");
+        const loadSets = async () => {
+            setIsLoading(true);
+            const { data, error } = await supabase
+                .from("sets")
+                .select("*")
+                .eq("match_id", match.id)
+                .order("set_number");
 
-        if (data && data.length > 0) {
-            setSets(data);
-            const lastSet = data[data.length - 1];
-            // If last set is confirmed, prepare next set
-            if (lastSet.is_confirmed && match.status !== "completed") {
-                setCurrentSetNumber(lastSet.set_number + 1);
-                resetInputs();
-            } else if (!lastSet.is_confirmed) {
-                // If last set is not confirmed, load it
-                setCurrentSetNumber(lastSet.set_number);
-                // Be careful - arrays from DB might be shorter or longer? 
-                // Assuming standard 3 arrows for now.
-                const a1 = [...lastSet.archer1_arrows, null, null, null].slice(0, 3);
-                const a2 = [...lastSet.archer2_arrows, null, null, null].slice(0, 3);
-                setArcher1Arrows(a1);
-                setArcher2Arrows(a2);
+            if (cancelled) return;
+            if (error) {
+                toast.error("Error cargando sets");
+                setIsLoading(false);
+                return;
             }
-        } else {
-            setCurrentSetNumber(1);
-            resetInputs();
+
+            const nextSets = (data || []) as MatchSet[];
+            const regulationSets = nextSets.filter((setRow) => setRow.is_confirmed && !setRow.is_shootoff);
+            const existingShootOff = nextSets.find((setRow) => setRow.is_shootoff || setRow.set_number === 99);
+
+            setSets(nextSets);
+            if (match.status === "shootoff") {
+                setCurrentSetNumber(99);
+                setArcher1Arrows(cloneArrows(existingShootOff?.archer1_arrows, 1));
+                setArcher2Arrows(cloneArrows(existingShootOff?.archer2_arrows, 1));
+            } else {
+                setCurrentSetNumber(regulationSets.length + 1);
+                setArcher1Arrows([null, null, null]);
+                setArcher2Arrows([null, null, null]);
+            }
+
+            setActiveArcher(1);
+            setActiveCursor(0);
+            setShootOffWinner(null);
+            setIsLoading(false);
+        };
+
+        void loadSets();
+        return () => {
+            cancelled = true;
+        };
+    }, [match.id, match.status, supabase]);
+
+    const handleKeypadPress = (value: number) => {
+        if (isCompleted) return;
+
+        const maxIndex = arrowSlots - 1;
+        const cellIndex = Math.min(activeCursor, maxIndex);
+
+        if (activeArcher === 1) {
+            if (archer1Arrows[cellIndex] !== null) return;
+            const next = [...archer1Arrows];
+            next[cellIndex] = value;
+            setArcher1Arrows(next);
+            if (activeCursor < maxIndex) setActiveCursor(activeCursor + 1);
+            else {
+                setActiveArcher(2);
+                setActiveCursor(0);
+            }
+            return;
         }
+
+        if (archer2Arrows[cellIndex] !== null) return;
+        const next = [...archer2Arrows];
+        next[cellIndex] = value;
+        setArcher2Arrows(next);
+        if (activeCursor < maxIndex) setActiveCursor(activeCursor + 1);
     };
 
-    const resetInputs = () => {
-        setArcher1Arrows([null, null, null]);
-        setArcher2Arrows([null, null, null]);
-        setActiveArcher("archer1");
-    };
-
-    const handleKeypadClick = (value: number | string) => {
-        if (isMatchComplete) return;
-
-        let scoreVal: number;
-        if (value === "X") scoreVal = 11;
-        else if (value === "M") scoreVal = 0;
-        else scoreVal = Number(value);
-
-        if (activeArcher === "archer1") {
-            const index = archer1Arrows.findIndex(s => s === null);
-            if (index !== -1) {
-                const newArrows = [...archer1Arrows];
-                newArrows[index] = scoreVal;
-                setArcher1Arrows(newArrows);
-                // Auto advance if full
-                if (index === 2) {
-                    setActiveArcher("archer2");
-                }
-            }
-        } else {
-            const index = archer2Arrows.findIndex(s => s === null);
-            if (index !== -1) {
-                const newArrows = [...archer2Arrows];
-                newArrows[index] = scoreVal;
-                setArcher2Arrows(newArrows);
-            }
-        }
+    const handleCellClick = (archer: 1 | 2, index: number) => {
+        if (isCompleted) return;
+        setActiveArcher(archer);
+        setActiveCursor(index);
     };
 
     const handleDelete = () => {
-        if (isMatchComplete) return;
+        if (isCompleted) return;
 
-        if (activeArcher === "archer2") {
-            const index = [...archer2Arrows].reverse().findIndex(s => s !== null);
-            if (index !== -1) {
-                const realIndex = 2 - index;
-                const newArrows = [...archer2Arrows];
-                newArrows[realIndex] = null;
-                setArcher2Arrows(newArrows);
+        const deleteFrom = (
+            values: (number | null)[],
+            setValues: (values: (number | null)[]) => void,
+            fallback?: () => void
+        ) => {
+            const next = [...values];
+            let index = Math.min(activeCursor, arrowSlots - 1);
+            if (next[index] === null) {
+                index =
+                    Array.from({ length: arrowSlots }, (_, i) => i)
+                        .reverse()
+                        .find((i) => next[i] !== null) ?? -1;
+            }
+            if (index === -1) {
+                fallback?.();
                 return;
             }
-            // If archer 2 empty, go back to archer 1
-            if (archer2Arrows.every(s => s === null)) {
-                setActiveArcher("archer1");
-            }
+            next[index] = null;
+            setValues(next);
+            setActiveCursor(Math.max(index - 1, 0));
+        };
+
+        if (activeArcher === 2) {
+            deleteFrom(archer2Arrows, setArcher2Arrows, () => {
+                setActiveArcher(1);
+                setActiveCursor(Math.max(arrowSlots - 1, 0));
+            });
+            return;
         }
 
-        if (activeArcher === "archer1") {
-            const index = [...archer1Arrows].reverse().findIndex(s => s !== null);
-            if (index !== -1) {
-                const realIndex = 2 - index;
-                const newArrows = [...archer1Arrows];
-                newArrows[realIndex] = null;
-                setArcher1Arrows(newArrows);
-            }
-        }
+        deleteFrom(archer1Arrows, setArcher1Arrows);
     };
 
-    const calculateSetTotal = (arrows: (number | null)[]) => {
-        return arrows.reduce((sum: number, val: number | null) => {
-            if (val === null) return sum;
-            return sum + (val === 11 ? 10 : val);
-        }, 0) || 0;
-    };
-
-    const isSetComplete = () => {
-        return archer1Arrows.every(a => a !== null) && archer2Arrows.every(a => a !== null);
-    };
-
-    const confirmSet = async () => {
-        if (!isSetComplete()) return;
-        setIsLoading(true);
-
-        const score1 = calculateSetTotal(archer1Arrows);
-        const score2 = calculateSetTotal(archer2Arrows);
-
-        let p1 = 0;
-        let p2 = 0;
-
-        if (score1 > score2) {
-            p1 = 2;
-        } else if (score2 > score1) {
-            p2 = 2;
-        } else {
-            p1 = 1;
-            p2 = 1;
-        }
-
-        try {
-            // 1. Save Set
-            // Check if set exists to update vs insert
-            const existingSet = sets.find(s => s.set_number === currentSetNumber);
-
-            const setPayload = {
-                match_id: match.id,
-                set_number: currentSetNumber,
-                archer1_arrows: archer1Arrows.map(v => v === null ? 0 : v),
-                archer2_arrows: archer2Arrows.map(v => v === null ? 0 : v),
-                archer1_set_result: p1,
-                archer2_set_result: p2,
-                is_confirmed: true,
-                confirmed_at: new Date().toISOString(),
-                is_shootoff: false, // Handle separately if needed
-            };
-
-            if (existingSet) {
-                await supabase.from("sets").update(setPayload).eq("id", existingSet.id);
-            } else {
-                await supabase.from("sets").insert(setPayload);
-            }
-
-            // 2. Update Match Totals
-            const newTotal1 = match.archer1_set_points + p1;
-            const newTotal2 = match.archer2_set_points + p2;
-
-            let newStatus = "in_progress";
-            let winnerId = null;
-
-            // Check Win Condition (6 points)
-            if (newTotal1 >= 6 || newTotal2 >= 6) {
-                newStatus = "completed";
-                if (newTotal1 > newTotal2) winnerId = match.archer1_id;
-                else if (newTotal2 > newTotal1) winnerId = match.archer2_id;
-                else {
-                    // Tie at 6-6? Usually not possible with sets of 2pts to win 6.
-                    // 5-5 -> shootoff.
-                    // If 5-5, we go to shootoff.
-                }
-            } else if (newTotal1 === 5 && newTotal2 === 5) {
-                newStatus = "shootoff";
-            }
-
-            const { data: updatedMatch, error } = await supabase
-                .from("elimination_matches")
-                .update({
-                    archer1_set_points: newTotal1,
-                    archer2_set_points: newTotal2,
-                    status: newStatus as any,
-                    winner_id: winnerId,
-                })
-                .eq("id", match.id)
-                .select(`
-                    *,
-                    archer1:archers!elimination_matches_archer1_id_fkey(*),
-                    archer2:archers!elimination_matches_archer2_id_fkey(*),
-                    winner:archers!elimination_matches_winner_id_fkey(*)
-                `)
-                .single();
-
-            if (error) throw error;
-            if (updatedMatch) {
-                onMatchUpdate(updatedMatch);
-                await fetchSets();
-
-                // If match is completed, advance winner to next round
-                if (newStatus === "completed" && winnerId) {
-                    await advanceWinner(match, winnerId);
-                    toast.success("Set confirmado - Ganador avanzado");
-                } else {
-                    toast.success("Set confirmado");
-                }
-            }
-        } catch (error: any) {
-            console.error(error);
-            toast.error("Error guardando set", { description: error.message });
-        } finally {
-            setIsLoading(false);
-        }
+    const appendLocalSet = (newSet: MatchSet) => {
+        setSets((prev) => [...prev.filter((setRow) => setRow.set_number !== newSet.set_number), newSet].sort((a, b) => a.set_number - b.set_number));
     };
 
     const advanceWinner = async (completedMatch: EliminationMatchWithArchers, winnerId: string) => {
@@ -252,17 +206,7 @@ export function SetScorer({ match, onMatchUpdate }: SetScorerProps) {
         const nextRound = completedMatch.round_number + 1;
         const loserId = completedMatch.archer1_id === winnerId ? completedMatch.archer2_id : completedMatch.archer1_id;
 
-        console.log("advanceWinner called:", {
-            currentRound: completedMatch.round_number,
-            currentPosition: completedMatch.match_position,
-            nextRound,
-            nextMatchPosition,
-            bracketId: completedMatch.bracket_id,
-            winnerId,
-        });
-
-        // Advance winner to next round
-        const { data: nextMatch, error: nextMatchError } = await supabase
+        const { data: nextMatch } = await supabase
             .from("elimination_matches")
             .select("id, archer1_id, archer2_id, target_id")
             .eq("bracket_id", completedMatch.bracket_id)
@@ -270,538 +214,414 @@ export function SetScorer({ match, onMatchUpdate }: SetScorerProps) {
             .eq("match_position", nextMatchPosition)
             .single();
 
-        console.log("Next match query result:", { nextMatch, error: nextMatchError });
-
         if (nextMatch) {
             const isOddPosition = completedMatch.match_position % 2 === 1;
-            const updateData: Record<string, string> = isOddPosition
-                ? { archer1_id: winnerId }
-                : { archer2_id: winnerId };
-
-            console.log("Updating next match:", { nextMatchId: nextMatch.id, updateData });
-
-            const { error: updateError } = await supabase
-                .from("elimination_matches")
-                .update(updateData)
-                .eq("id", nextMatch.id);
-
-            if (updateError) {
-                console.error("Error updating next match:", updateError);
-            } else {
-                console.log("Next match updated successfully");
-            }
-        } else {
-            console.log("No next match found - this might be the final!");
+            const updateData: Record<string, string> = isOddPosition ? { archer1_id: winnerId } : { archer2_id: winnerId };
+            const otherArcherId = isOddPosition ? nextMatch.archer2_id : nextMatch.archer1_id;
+            if (otherArcherId && !nextMatch.target_id && completedMatch.target_id) updateData.target_id = completedMatch.target_id;
+            await supabase.from("elimination_matches").update(updateData).eq("id", nextMatch.id);
         }
 
-        // Check if this is a semifinal - if so, place loser in bronze match
-        // First, get bracket_size to determine which round is the semifinal
         const { data: bracket } = await supabase
             .from("elimination_brackets")
             .select("bracket_size")
             .eq("id", completedMatch.bracket_id)
             .single();
 
-        if (bracket) {
-            const totalRounds = Math.log2(bracket.bracket_size);
-            const semifinalRound = totalRounds - 1; // Semifinal is one round before final
+        if (!bracket) return;
 
-            console.log("Semifinal check:", {
-                currentRound: completedMatch.round_number,
-                semifinalRound,
-                bracketSize: bracket.bracket_size
-            });
-
-            if (completedMatch.round_number === semifinalRound) {
-                // This IS a semifinal! Place loser in bronze match
-                const { data: bronzeMatch } = await supabase
-                    .from("elimination_matches")
-                    .select("id, archer1_id, archer2_id")
-                    .eq("bracket_id", completedMatch.bracket_id)
-                    .eq("round_number", 0) // Bronze match indicator
-                    .single();
-
-                if (bronzeMatch) {
-                    const isFirstSemifinal = completedMatch.match_position === 1;
-                    const bronzeUpdate = isFirstSemifinal
-                        ? { archer1_id: loserId }
-                        : { archer2_id: loserId };
-
-                    await supabase
-                        .from("elimination_matches")
-                        .update(bronzeUpdate)
-                        .eq("id", bronzeMatch.id);
-                    console.log("Loser placed in bronze match:", { loserId, isFirstSemifinal });
-                }
-            }
-        }
-    };
-
-    // Shootoff handlers
-    const handleShootoffArrowPress = (value: number) => {
-        if (activeArcher === "archer1" && shootoffArcher1Arrow === null) {
-            setShootoffArcher1Arrow(value);
-            setActiveArcher("archer2");
-        } else if (activeArcher === "archer2" && shootoffArcher2Arrow === null) {
-            setShootoffArcher2Arrow(value);
-        }
-    };
-
-    const handleShootoffSubmit = async () => {
-        if (shootoffArcher1Arrow === null || shootoffArcher2Arrow === null) return;
-
-        const score1 = shootoffArcher1Arrow === 11 ? 10 : shootoffArcher1Arrow;
-        const score2 = shootoffArcher2Arrow === 11 ? 10 : shootoffArcher2Arrow;
-
-        if (score1 === score2) {
-            // Tied! Need distance measurement
-            setShootoffPhase("distance");
-            return;
-        }
-
-        // We have a winner based on score
-        setShootoffPhase("confirm");
-    };
-
-    const confirmShootoffWinner = async () => {
-        setIsLoading(true);
-        try {
-            const score1 = shootoffArcher1Arrow === 11 ? 10 : (shootoffArcher1Arrow || 0);
-            const score2 = shootoffArcher2Arrow === 11 ? 10 : (shootoffArcher2Arrow || 0);
-
-            let winnerId: string;
-
-            if (score1 !== score2) {
-                winnerId = score1 > score2 ? match.archer1_id! : match.archer2_id!;
-            } else {
-                // Determine by distance (closer wins)
-                const dist1 = parseFloat(shootoffArcher1Distance) || 999;
-                const dist2 = parseFloat(shootoffArcher2Distance) || 999;
-                winnerId = dist1 < dist2 ? match.archer1_id! : match.archer2_id!;
-            }
-
-            // Save shootoff set (set_number = 99)
-            await supabase.from("sets").insert({
-                match_id: match.id,
-                set_number: 99,
-                archer1_arrows: [shootoffArcher1Arrow || 0],
-                archer2_arrows: [shootoffArcher2Arrow || 0],
-                archer1_set_result: winnerId === match.archer1_id ? 1 : 0,
-                archer2_set_result: winnerId === match.archer2_id ? 1 : 0,
-                is_confirmed: true,
-                confirmed_at: new Date().toISOString(),
-                is_shootoff: true,
-            });
-
-            // Update match
-            const { data: updatedMatch } = await supabase
+        const semifinalRound = Math.log2(bracket.bracket_size) - 1;
+        if (completedMatch.round_number === semifinalRound && loserId) {
+            const { data: bronzeMatch } = await supabase
                 .from("elimination_matches")
-                .update({
-                    status: "completed",
-                    winner_id: winnerId,
-                })
-                .eq("id", match.id)
-                .select(`
-                    *,
-                    archer1:archers!elimination_matches_archer1_id_fkey(*),
-                    archer2:archers!elimination_matches_archer2_id_fkey(*),
-                    winner:archers!elimination_matches_winner_id_fkey(*)
-                `)
+                .select("id")
+                .eq("bracket_id", completedMatch.bracket_id)
+                .eq("round_number", 0)
                 .single();
 
-            if (updatedMatch) {
-                await advanceWinner(updatedMatch as EliminationMatchWithArchers, winnerId);
-                onMatchUpdate(updatedMatch as EliminationMatchWithArchers);
-                toast.success("¡Shoot-off completado!");
+            if (bronzeMatch) {
+                const bronzeUpdate = completedMatch.match_position === 1 ? { archer1_id: loserId } : { archer2_id: loserId };
+                await supabase.from("elimination_matches").update(bronzeUpdate).eq("id", bronzeMatch.id);
             }
-        } catch (error: any) {
-            console.error(error);
-            toast.error("Error en shoot-off");
+        }
+
+        await resolvePendingByeAdvances(supabase, completedMatch.bracket_id, bracket.bracket_size);
+    };
+
+    const archer1Total = archer1Arrows
+        .slice(0, arrowSlots)
+        .reduce((sum: number, arrow: number | null) => sum + scoreValue(arrow), 0);
+    const archer2Total = archer2Arrows
+        .slice(0, arrowSlots)
+        .reduce((sum: number, arrow: number | null) => sum + scoreValue(arrow), 0);
+
+    const allArrowsFilled = useMemo(
+        () =>
+            archer1Arrows.slice(0, arrowSlots).every((arrow) => arrow !== null) &&
+            archer2Arrows.slice(0, arrowSlots).every((arrow) => arrow !== null),
+        [archer1Arrows, archer2Arrows, arrowSlots]
+    );
+
+    const currentSetPreview = useMemo(() => {
+        if (!allArrowsFilled) return { left: null, right: null };
+        if (isShootOff) {
+            if (archer1Total > archer2Total) return { left: 1, right: 0 };
+            if (archer2Total > archer1Total) return { left: 0, right: 1 };
+            return { left: shootOffWinner === 1 ? 1 : 0, right: shootOffWinner === 2 ? 1 : 0 };
+        }
+        if (archer1Total > archer2Total) return { left: 2, right: 0 };
+        if (archer2Total > archer1Total) return { left: 0, right: 2 };
+        return { left: 1, right: 1 };
+    }, [allArrowsFilled, archer1Total, archer2Total, isShootOff, shootOffWinner]);
+
+    const isShootOffTie = isShootOff && allArrowsFilled && archer1Total === archer2Total;
+
+    const handleConfirm = async () => {
+        if (!allArrowsFilled || isCompleted) return;
+        setIsSaving(true);
+
+        try {
+            if (isShootOff) {
+                let winnerId: string | null = null;
+                if (archer1Total > archer2Total) winnerId = match.archer1_id;
+                else if (archer2Total > archer1Total) winnerId = match.archer2_id;
+                else if (shootOffWinner === 1) winnerId = match.archer1_id;
+                else if (shootOffWinner === 2) winnerId = match.archer2_id;
+
+                if (!winnerId) {
+                    toast.error("Define el ganador del shoot-off");
+                    return;
+                }
+
+                const newSet: MatchSet = {
+                    id: shootOffSet?.id || `shootoff-${match.id}`,
+                    match_id: match.id,
+                    set_number: 99,
+                    archer1_arrows: [archer1Arrows[0] ?? 0],
+                    archer2_arrows: [archer2Arrows[0] ?? 0],
+                    archer1_set_result: winnerId === match.archer1_id ? 1 : 0,
+                    archer2_set_result: winnerId === match.archer2_id ? 1 : 0,
+                    is_shootoff: true,
+                    shootoff_archer1_distance: null,
+                    shootoff_archer2_distance: null,
+                    is_confirmed: true,
+                    confirmed_at: new Date().toISOString(),
+                };
+
+                const nextArcher1Points = match.archer1_set_points + (winnerId === match.archer1_id ? 1 : 0);
+                const nextArcher2Points = match.archer2_set_points + (winnerId === match.archer2_id ? 1 : 0);
+
+                const { error: setError } = await supabase.from("sets").upsert({
+                    match_id: match.id,
+                    set_number: 99,
+                    archer1_arrows: newSet.archer1_arrows,
+                    archer2_arrows: newSet.archer2_arrows,
+                    archer1_set_result: newSet.archer1_set_result,
+                    archer2_set_result: newSet.archer2_set_result,
+                    is_confirmed: true,
+                    is_shootoff: true,
+                    confirmed_at: newSet.confirmed_at,
+                }, { onConflict: "match_id,set_number" });
+
+                if (setError) throw setError;
+
+                const { error: matchError } = await supabase
+                    .from("elimination_matches")
+                    .update({
+                        status: "completed",
+                        winner_id: winnerId,
+                        archer1_set_points: nextArcher1Points,
+                        archer2_set_points: nextArcher2Points,
+                    })
+                    .eq("id", match.id);
+
+                if (matchError) throw matchError;
+
+                await advanceWinner(match, winnerId);
+                appendLocalSet(newSet);
+                onMatchUpdate({
+                    ...match,
+                    status: "completed",
+                    winner_id: winnerId,
+                    winner: winnerId === match.archer1_id ? match.archer1 : match.archer2,
+                    archer1_set_points: nextArcher1Points,
+                    archer2_set_points: nextArcher2Points,
+                });
+                toast.success("Shoot-off completado");
+                return;
+            }
+
+            let archer1Points = 0;
+            let archer2Points = 0;
+            if (archer1Total > archer2Total) archer1Points = 2;
+            else if (archer2Total > archer1Total) archer2Points = 2;
+            else {
+                archer1Points = 1;
+                archer2Points = 1;
+            }
+
+            const nextArcher1Points = match.archer1_set_points + archer1Points;
+            const nextArcher2Points = match.archer2_set_points + archer2Points;
+
+            let status: "in_progress" | "shootoff" | "completed" = "in_progress";
+            let winnerId: string | null = null;
+
+            if (nextArcher1Points >= SET_SYSTEM.POINTS_TO_WIN) {
+                status = "completed";
+                winnerId = match.archer1_id;
+            } else if (nextArcher2Points >= SET_SYSTEM.POINTS_TO_WIN) {
+                status = "completed";
+                winnerId = match.archer2_id;
+            } else if (currentSetNumber >= SET_SYSTEM.MAX_SETS) {
+                if (nextArcher1Points === nextArcher2Points) status = "shootoff";
+                else {
+                    status = "completed";
+                    winnerId = nextArcher1Points > nextArcher2Points ? match.archer1_id : match.archer2_id;
+                }
+            }
+
+            const newSet: MatchSet = {
+                id: `${match.id}-${currentSetNumber}`,
+                match_id: match.id,
+                set_number: currentSetNumber,
+                archer1_arrows: archer1Arrows.slice(0, 3).map((arrow) => arrow ?? 0),
+                archer2_arrows: archer2Arrows.slice(0, 3).map((arrow) => arrow ?? 0),
+                archer1_set_result: archer1Points,
+                archer2_set_result: archer2Points,
+                is_shootoff: false,
+                shootoff_archer1_distance: null,
+                shootoff_archer2_distance: null,
+                is_confirmed: true,
+                confirmed_at: new Date().toISOString(),
+            };
+
+            const { error: setError } = await supabase.from("sets").upsert({
+                match_id: match.id,
+                set_number: currentSetNumber,
+                archer1_arrows: newSet.archer1_arrows,
+                archer2_arrows: newSet.archer2_arrows,
+                archer1_set_result: archer1Points,
+                archer2_set_result: archer2Points,
+                is_confirmed: true,
+                confirmed_at: newSet.confirmed_at,
+            }, { onConflict: "match_id,set_number" });
+
+            if (setError) throw setError;
+
+            const { error: matchError } = await supabase
+                .from("elimination_matches")
+                .update({
+                    archer1_set_points: nextArcher1Points,
+                    archer2_set_points: nextArcher2Points,
+                    status,
+                    winner_id: winnerId,
+                })
+                .eq("id", match.id);
+
+            if (matchError) throw matchError;
+
+            appendLocalSet(newSet);
+
+            const updatedMatch: EliminationMatchWithArchers = {
+                ...match,
+                archer1_set_points: nextArcher1Points,
+                archer2_set_points: nextArcher2Points,
+                status,
+                winner_id: winnerId,
+                winner: winnerId === match.archer1_id ? match.archer1 : winnerId === match.archer2_id ? match.archer2 : null,
+            };
+
+            if (winnerId) {
+                await advanceWinner(match, winnerId);
+                onMatchUpdate(updatedMatch);
+                toast.success("Duelo finalizado");
+                return;
+            }
+
+            onMatchUpdate(updatedMatch);
+            if (status === "shootoff") {
+                setCurrentSetNumber(99);
+                setArcher1Arrows([null, null, null]);
+                setArcher2Arrows([null, null, null]);
+                setActiveArcher(1);
+                setActiveCursor(0);
+                setShootOffWinner(null);
+                toast.info("Empate 5-5: registrar shoot-off");
+                return;
+            }
+
+            setCurrentSetNumber(currentSetNumber + 1);
+            setArcher1Arrows([null, null, null]);
+            setArcher2Arrows([null, null, null]);
+            setActiveArcher(1);
+            setActiveCursor(0);
+            toast.success(`Set ${currentSetNumber} confirmado`);
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : "Error interno";
+            toast.error("Error guardando set", { description: message });
         } finally {
-            setIsLoading(false);
+            setIsSaving(false);
         }
     };
 
-    const formatValue = (val: number | null) => {
-        if (val === null) return "";
-        if (val === 11) return "X";
-        if (val === 0) return "M";
-        return val.toString();
-    };
+    const renderArrowGroup = (values: (number | null)[], archer: 1 | 2, interactive: boolean, slots = arrowSlots) => (
+        <div className={`flex ${archer === 1 ? "justify-start" : "justify-end"} gap-1`}>
+            {Array.from({ length: slots }).map((_, index) => (
+                <button
+                    key={`${archer}-${index}`}
+                    type="button"
+                    disabled={!interactive}
+                    onClick={() => interactive && handleCellClick(archer, index)}
+                    className={`flex h-8 w-8 items-center justify-center rounded-md text-sm font-black transition ${getArrowColor(values[index] ?? null, interactive && activeArcher === archer && activeCursor === index)}`}
+                >
+                    {displayScore(values[index] ?? null)}
+                </button>
+            ))}
+        </div>
+    );
 
-    const getValueColor = (val: number | null) => {
-        if (val === null) return "bg-white border-slate-200";
-        if (val === 11 || val === 10) return "bg-yellow-100 border-yellow-400 text-yellow-800";
-        if (val === 9) return "bg-yellow-50 border-yellow-300 text-yellow-700";
-        if (val >= 7) return "bg-red-50 border-red-300 text-red-700";
-        if (val >= 5) return "bg-blue-50 border-blue-300 text-blue-700";
-        if (val >= 1) return "bg-slate-50 border-slate-300 text-slate-700";
-        return "bg-slate-100 border-slate-300 text-slate-500"; // Miss
-    };
+    if (isLoading) {
+        return (
+            <div className="flex min-h-[320px] items-center justify-center rounded-3xl bg-white shadow-md">
+                <Loader2 className="h-8 w-8 animate-spin text-[#0f4170]" />
+            </div>
+        );
+    }
 
     return (
-        <div className="space-y-4">
-            {/* Scoreboard */}
-            <Card className="border-2 border-slate-200 shadow-sm overflow-hidden">
-                <CardHeader className="bg-slate-50 border-b border-slate-200 py-2 px-4">
-                    <CardTitle className="text-sm font-bold text-slate-500 text-center uppercase tracking-wider">
-                        Marcador de Sets
-                    </CardTitle>
-                </CardHeader>
-                <div className="divide-y divide-slate-100">
-                    <div className="grid grid-cols-[1fr_auto_1fr] p-3 gap-4 items-center">
-                        <div className={`text-center transition-all duration-300 ${activeArcher === 'archer1' && !isMatchComplete ? 'scale-105 transform' : ''}`}>
-                            <div className="font-bold text-slate-900 truncate">
-                                {match.archer1 ? `${match.archer1.first_name}` : "Bye"}
-                            </div>
-                            <div className={cn(
-                                "text-4xl font-black mt-1",
-                                match.archer1_set_points > match.archer2_set_points ? "text-emerald-600" : "text-slate-700"
-                            )}>
-                                {match.archer1_set_points}
-                            </div>
-                            {activeArcher === 'archer1' && !isMatchComplete && (
-                                <div className="mt-1 inline-block px-2 py-0.5 bg-blue-100 text-blue-700 text-xs font-bold rounded-full animate-pulse">
-                                    Disparando
-                                </div>
-                            )}
+        <div className="space-y-3">
+            <Card className="border-0 shadow-md">
+                <CardContent className="p-0">
+                    <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 border-b border-slate-100 bg-white px-4 py-4">
+                        <div className="text-center">
+                            <div className="text-lg font-black text-slate-900">{match.archer1?.first_name || "-"}</div>
+                            <div className="text-xs font-medium text-slate-500">{match.archer1?.last_name || ""}</div>
+                            <div className="mt-1 text-[10px] font-bold uppercase tracking-wide text-slate-400">Seed #{match.archer1_seed || "?"}</div>
                         </div>
-                        <div className="text-sm font-bold text-slate-300 uppercase">vs</div>
-                        <div className={`text-center transition-all duration-300 ${activeArcher === 'archer2' && !isMatchComplete ? 'scale-105 transform' : ''}`}>
-                            <div className="font-bold text-slate-900 truncate">
-                                {match.archer2 ? `${match.archer2.first_name}` : "Bye"}
-                            </div>
-                            <div className={cn(
-                                "text-4xl font-black mt-1",
-                                match.archer2_set_points > match.archer1_set_points ? "text-emerald-600" : "text-slate-700"
-                            )}>
-                                {match.archer2_set_points}
-                            </div>
-                            {activeArcher === 'archer2' && !isMatchComplete && (
-                                <div className="mt-1 inline-block px-2 py-0.5 bg-blue-100 text-blue-700 text-xs font-bold rounded-full animate-pulse">
-                                    Disparando
+                        <div className="rounded-2xl bg-slate-50 px-4 py-2 text-center ring-1 ring-slate-200">
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <div className="text-3xl font-black text-emerald-500">{match.archer1_set_points}</div>
+                                    <div className="text-[10px] font-bold uppercase text-slate-500">Acum.</div>
                                 </div>
-                            )}
+                                <div>
+                                    <div className="text-3xl font-black text-[#0f4170]">{match.archer2_set_points}</div>
+                                    <div className="text-[10px] font-bold uppercase text-slate-500">Acum.</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="text-center">
+                            <div className="text-lg font-black text-slate-900">{match.archer2?.first_name || "-"}</div>
+                            <div className="text-xs font-medium text-slate-500">{match.archer2?.last_name || ""}</div>
+                            <div className="mt-1 text-[10px] font-bold uppercase tracking-wide text-slate-400">Seed #{match.archer2_seed || "?"}</div>
                         </div>
                     </div>
-                </div>
+
+                    <div className="grid grid-cols-[1fr_auto_auto_auto_1fr] items-center gap-2 bg-slate-100 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                        <div className="text-left">Flechas</div>
+                        <div className="text-center">Pts</div>
+                        <div className="text-center">Set</div>
+                        <div className="text-center">Pts</div>
+                        <div className="text-right">Flechas</div>
+                    </div>
+
+                    <div className="divide-y divide-slate-100">
+                        {confirmedSets.map((setRow) => (
+                            <div key={setRow.id} className="grid grid-cols-[1fr_auto_auto_auto_1fr] items-center gap-2 px-3 py-3">
+                                {renderArrowGroup(cloneArrows(setRow.archer1_arrows, 3), 1, false, 3)}
+                                <div className="text-center text-lg font-black text-slate-700">{setRow.archer1_set_result || 0}</div>
+                                <div className="text-center text-xs font-bold uppercase tracking-wide text-slate-400">Set {setRow.set_number}</div>
+                                <div className="text-center text-lg font-black text-slate-700">{setRow.archer2_set_result || 0}</div>
+                                {renderArrowGroup(cloneArrows(setRow.archer2_arrows, 3), 2, false, 3)}
+                            </div>
+                        ))}
+
+                        {shootOffSet?.is_confirmed && (
+                            <div className="grid grid-cols-[1fr_auto_auto_auto_1fr] items-center gap-2 bg-amber-50/60 px-3 py-3">
+                                {renderArrowGroup(cloneArrows(shootOffSet.archer1_arrows, 1), 1, false, 1)}
+                                <div className="text-center text-lg font-black text-slate-700">{shootOffSet.archer1_set_result || 0}</div>
+                                <div className="text-center">
+                                    <div className="text-xs font-bold uppercase tracking-wide text-amber-700">Set {confirmedSets.length + 1}</div>
+                                    <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Shoot-off</div>
+                                </div>
+                                <div className="text-center text-lg font-black text-slate-700">{shootOffSet.archer2_set_result || 0}</div>
+                                {renderArrowGroup(cloneArrows(shootOffSet.archer2_arrows, 1), 2, false, 1)}
+                            </div>
+                        )}
+
+                        {!isCompleted && (
+                            <div className="space-y-3 bg-sky-50/60 px-3 py-3">
+                                <div className="grid grid-cols-[1fr_auto_auto_auto_1fr] items-center gap-2">
+                                    {renderArrowGroup(archer1Arrows, 1, true, arrowSlots)}
+                                    <div className="text-center text-lg font-black text-slate-800">{currentSetPreview.left ?? "-"}</div>
+                                    <div className="text-center text-xs font-bold uppercase tracking-wide text-sky-700">
+                                        {isShootOff ? "Shoot-off" : `Set ${currentSetNumber}`}
+                                    </div>
+                                    <div className="text-center text-lg font-black text-slate-800">{currentSetPreview.right ?? "-"}</div>
+                                    {renderArrowGroup(archer2Arrows, 2, true, arrowSlots)}
+                                </div>
+
+                                {isShootOffTie && (
+                                    <div className="rounded-xl bg-white px-3 py-3 ring-1 ring-amber-200">
+                                        <div className="mb-2 text-sm font-bold text-amber-700">Empate en el shoot-off. Marca al ganador del duelo.</div>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <label className="flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700">
+                                                <input type="checkbox" checked={shootOffWinner === 1} onChange={() => setShootOffWinner(shootOffWinner === 1 ? null : 1)} />
+                                                {match.archer1?.first_name} {match.archer1?.last_name}
+                                            </label>
+                                            <label className="flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700">
+                                                <input type="checkbox" checked={shootOffWinner === 2} onChange={() => setShootOffWinner(shootOffWinner === 2 ? null : 2)} />
+                                                {match.archer2?.first_name} {match.archer2?.last_name}
+                                            </label>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                </CardContent>
             </Card>
 
-            {/* Set History Table - Only if there are previous sets */}
-            {sets.length > 0 && (
-                <div className="overflow-x-auto pb-2">
-                    <table className="w-full text-sm border-collapse">
-                        <thead>
-                            <tr className="text-slate-500 border-b border-slate-200">
-                                <th className="p-2 text-left font-medium">Set</th>
-                                <th className="p-2 text-center font-medium">{match.archer1?.first_name}</th>
-                                <th className="p-2 text-center font-medium">Pts</th>
-                                <th className="p-2 text-center font-medium">Pts</th>
-                                <th className="p-2 text-center font-medium">{match.archer2?.first_name}</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                            {sets.map((set) => {
-                                const score1 = set.archer1_arrows.reduce((a, b) => a + (b === 11 ? 10 : b), 0);
-                                const score2 = set.archer2_arrows.reduce((a, b) => a + (b === 11 ? 10 : b), 0);
-                                return (
-                                    <tr key={set.id} className="bg-white">
-                                        <td className="p-2 font-bold text-slate-900">#{set.set_number}</td>
-                                        <td className="p-2 text-center">
-                                            <div className="flex justify-center gap-1">
-                                                {set.archer1_arrows.map((v, i) => (
-                                                    <span key={i} className="text-xs text-slate-600 font-mono">
-                                                        {v === 11 ? 'X' : (v === 0 ? 'M' : v)}
-                                                    </span>
-                                                ))}
-                                                <span className="font-bold ml-1 text-slate-900">({score1})</span>
-                                            </div>
-                                        </td>
-                                        <td className={cn("p-2 text-center font-bold", set.archer1_set_result === 2 ? "text-emerald-600" : "text-slate-400")}>
-                                            {set.archer1_set_result}
-                                        </td>
-                                        <td className={cn("p-2 text-center font-bold", set.archer2_set_result === 2 ? "text-emerald-600" : "text-slate-400")}>
-                                            {set.archer2_set_result}
-                                        </td>
-                                        <td className="p-2 text-center">
-                                            <div className="flex justify-center gap-1">
-                                                {set.archer2_arrows.map((v, i) => (
-                                                    <span key={i} className="text-xs text-slate-600 font-mono">
-                                                        {v === 11 ? 'X' : (v === 0 ? 'M' : v)}
-                                                    </span>
-                                                ))}
-                                                <span className="font-bold ml-1 text-slate-900">({score2})</span>
-                                            </div>
-                                        </td>
-                                    </tr>
-                                )
-                            })}
-                        </tbody>
-                    </table>
-                </div>
-            )}
-
-            {/* Current Set Input Area */}
-            {!isMatchComplete && !isShootoff && (
-                <Card className="border-2 border-blue-100 shadow-md">
-                    <CardHeader className="bg-blue-50/50 border-b border-blue-100 py-3 px-4 flex flex-row items-center justify-between">
-                        <CardTitle className="text-base font-bold text-blue-900">
-                            Set {currentSetNumber}
-                        </CardTitle>
-                        <div className="text-xs font-medium text-blue-700 bg-blue-100 px-2 py-1 rounded-full">
-                            Ingresando: {activeArcher === 'archer1' ? match.archer1?.first_name : match.archer2?.first_name}
-                        </div>
-                    </CardHeader>
-                    <CardContent className="p-4 space-y-6">
-                        {/* Archer 1 Inputs */}
-                        <div
-                            className={`space-y-2 transition-opacity ${activeArcher === 'archer2' ? 'opacity-50' : 'opacity-100'}`}
-                            onClick={() => setActiveArcher('archer1')}
-                        >
-                            <label className="text-xs font-bold text-slate-500 uppercase flex justify-between">
-                                <span>{match.archer1?.first_name}</span>
-                                <span className="text-slate-900 font-black text-sm">
-                                    Total: {calculateSetTotal(archer1Arrows)}
-                                </span>
-                            </label>
-                            <div className="grid grid-cols-3 gap-2">
-                                {archer1Arrows.map((val, idx) => (
-                                    <div
-                                        key={`a1-${idx}`}
-                                        className={cn(
-                                            "h-14 rounded-xl border-2 flex items-center justify-center text-2xl font-black shadow-sm transition-all",
-                                            getValueColor(val),
-                                            activeArcher === 'archer1' && val === null && archer1Arrows[idx - 1] !== null ? "ring-2 ring-blue-500 ring-offset-2 scale-105" : ""
-                                        )}
-                                    >
-                                        {formatValue(val)}
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-
-                        {/* Archer 2 Inputs */}
-                        <div
-                            className={`space-y-2 transition-opacity ${activeArcher === 'archer1' ? 'opacity-50' : 'opacity-100'}`}
-                            onClick={() => setActiveArcher('archer2')}
-                        >
-                            <label className="text-xs font-bold text-slate-500 uppercase flex justify-between">
-                                <span>{match.archer2?.first_name}</span>
-                                <span className="text-slate-900 font-black text-sm">
-                                    Total: {calculateSetTotal(archer2Arrows)}
-                                </span>
-                            </label>
-                            <div className="grid grid-cols-3 gap-2">
-                                {archer2Arrows.map((val, idx) => (
-                                    <div
-                                        key={`a2-${idx}`}
-                                        className={cn(
-                                            "h-14 rounded-xl border-2 flex items-center justify-center text-2xl font-black shadow-sm transition-all",
-                                            getValueColor(val),
-                                            activeArcher === 'archer2' && val === null && archer2Arrows[idx - 1] !== null ? "ring-2 ring-blue-500 ring-offset-2 scale-105" : ""
-                                        )}
-                                    >
-                                        {formatValue(val)}
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-
-                        {/* Keypad */}
-                        <div className="grid grid-cols-4 gap-2 pt-2">
-                            {['X', '10', '9', '8', '7', '6', '5', '4', '3', '2', '1', 'M'].map((btn) => (
-                                <button
-                                    key={btn}
-                                    onClick={() => handleKeypadClick(btn)}
-                                    className={cn(
-                                        "h-12 rounded-lg font-bold text-xl transition-all active:scale-95 shadow-sm border-b-4",
-                                        btn === 'X' || btn === '10' ? "bg-yellow-100 text-yellow-800 border-yellow-300 hover:bg-yellow-200" :
-                                            btn === '9' ? "bg-yellow-50 text-yellow-700 border-yellow-200 hover:bg-yellow-100" :
-                                                btn === 'M' ? "bg-slate-200 text-slate-600 border-slate-300 hover:bg-slate-300" :
-                                                    Number(btn) >= 7 ? "bg-red-50 text-red-700 border-red-200 hover:bg-red-100" :
-                                                        Number(btn) >= 5 ? "bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100" :
-                                                            "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
-                                    )}
-                                >
-                                    {btn}
-                                </button>
-                            ))}
-                        </div>
-
-                        {/* Actions */}
-                        <div className="flex gap-3">
-                            <Button
-                                variant="outline"
-                                className="flex-1 h-12 text-red-600 hover:bg-red-50 border-red-200"
-                                onClick={handleDelete}
-                            >
-                                <Delete className="h-5 w-5 mr-2" />
-                                Borrar
-                            </Button>
-                            <Button
-                                className="flex-[2] h-12 text-lg font-bold bg-blue-600 hover:bg-blue-700 shadow-md"
-                                onClick={confirmSet}
-                                disabled={!isSetComplete() || isLoading}
-                            >
-                                {isLoading ? <Loader2 className="animate-spin" /> : "Confirmar Set"}
-                            </Button>
-                        </div>
-                    </CardContent>
-                </Card>
-            )}
-
-            {/* Shootoff UI */}
-            {isShootoff && (
-                <Card className="border-2 border-amber-200 bg-amber-50">
-                    <CardHeader className="bg-amber-100 border-b border-amber-200 py-3 px-4">
-                        <CardTitle className="text-base font-bold text-amber-900 text-center">
-                            ⚡ SHOOT-OFF (5-5)
-                        </CardTitle>
-                    </CardHeader>
-                    <CardContent className="p-4 space-y-4">
-                        {/* Phase 1: Arrow Input */}
-                        {shootoffPhase === "arrows" && (
-                            <>
-                                <div className="grid grid-cols-2 gap-4">
-                                    <div className={`text-center p-3 rounded-lg ${activeArcher === 'archer1' ? 'bg-blue-100 ring-2 ring-blue-500' : 'bg-slate-100'}`}
-                                        onClick={() => setActiveArcher('archer1')}>
-                                        <div className="font-bold text-sm">{match.archer1?.first_name}</div>
-                                        <div className={cn("text-4xl font-black mt-2", getValueColor(shootoffArcher1Arrow))}>
-                                            {shootoffArcher1Arrow === null ? "-" : formatValue(shootoffArcher1Arrow)}
-                                        </div>
-                                    </div>
-                                    <div className={`text-center p-3 rounded-lg ${activeArcher === 'archer2' ? 'bg-red-100 ring-2 ring-red-500' : 'bg-slate-100'}`}
-                                        onClick={() => setActiveArcher('archer2')}>
-                                        <div className="font-bold text-sm">{match.archer2?.first_name}</div>
-                                        <div className={cn("text-4xl font-black mt-2", getValueColor(shootoffArcher2Arrow))}>
-                                            {shootoffArcher2Arrow === null ? "-" : formatValue(shootoffArcher2Arrow)}
-                                        </div>
-                                    </div>
-                                </div>
-
-                                {/* Shootoff Keypad */}
-                                <div className="grid grid-cols-4 gap-2">
-                                    {['X', '10', '9', '8', '7', '6', '5', '4', '3', '2', '1', 'M'].map((btn) => (
-                                        <button
-                                            key={btn}
-                                            onClick={() => handleShootoffArrowPress(btn === 'X' ? 11 : btn === 'M' ? 0 : parseInt(btn))}
-                                            className={cn(
-                                                "h-12 rounded-lg font-bold text-lg transition-all active:scale-95",
-                                                btn === 'X' || btn === '10' ? "bg-yellow-100 text-yellow-800" :
-                                                    btn === '9' ? "bg-yellow-50 text-yellow-700" :
-                                                        btn === 'M' ? "bg-slate-200 text-slate-600" :
-                                                            Number(btn) >= 7 ? "bg-red-50 text-red-700" :
-                                                                Number(btn) >= 5 ? "bg-blue-50 text-blue-700" :
-                                                                    "bg-white text-slate-700 border border-slate-200"
-                                            )}
-                                        >
-                                            {btn}
-                                        </button>
-                                    ))}
-                                </div>
-
-                                <Button
-                                    onClick={handleShootoffSubmit}
-                                    disabled={shootoffArcher1Arrow === null || shootoffArcher2Arrow === null}
-                                    className="w-full bg-amber-600 hover:bg-amber-700"
-                                >
-                                    Continuar
-                                </Button>
-                            </>
-                        )}
-
-                        {/* Phase 2: Distance Measurement */}
-                        {shootoffPhase === "distance" && (
-                            <>
-                                <div className="text-center mb-4">
-                                    <AlertTriangle className="h-8 w-8 text-amber-600 mx-auto mb-2" />
-                                    <p className="font-bold text-amber-900">¡Empate! Medir distancia al centro</p>
-                                </div>
-                                <div className="grid grid-cols-2 gap-4">
-                                    <div className="space-y-2">
-                                        <label className="text-xs font-bold text-slate-500">{match.archer1?.first_name}</label>
-                                        <input
-                                            type="number"
-                                            step="0.1"
-                                            placeholder="cm"
-                                            value={shootoffArcher1Distance}
-                                            onChange={(e) => setShootoffArcher1Distance(e.target.value)}
-                                            className="w-full p-3 text-center text-xl font-bold border-2 rounded-lg"
-                                        />
-                                    </div>
-                                    <div className="space-y-2">
-                                        <label className="text-xs font-bold text-slate-500">{match.archer2?.first_name}</label>
-                                        <input
-                                            type="number"
-                                            step="0.1"
-                                            placeholder="cm"
-                                            value={shootoffArcher2Distance}
-                                            onChange={(e) => setShootoffArcher2Distance(e.target.value)}
-                                            className="w-full p-3 text-center text-xl font-bold border-2 rounded-lg"
-                                        />
-                                    </div>
-                                </div>
-                                <Button
-                                    onClick={() => setShootoffPhase("confirm")}
-                                    disabled={!shootoffArcher1Distance || !shootoffArcher2Distance}
-                                    className="w-full bg-amber-600 hover:bg-amber-700"
-                                >
-                                    Confirmar Distancias
-                                </Button>
-                            </>
-                        )}
-
-                        {/* Phase 3: Confirm Winner */}
-                        {shootoffPhase === "confirm" && (
-                            <>
-                                <div className="text-center">
-                                    <Trophy className="h-10 w-10 text-yellow-500 mx-auto mb-2" />
-                                    <p className="font-bold text-lg mb-1">
-                                        Ganador: {
-                                            (() => {
-                                                const s1 = shootoffArcher1Arrow === 11 ? 10 : (shootoffArcher1Arrow || 0);
-                                                const s2 = shootoffArcher2Arrow === 11 ? 10 : (shootoffArcher2Arrow || 0);
-                                                if (s1 !== s2) {
-                                                    return s1 > s2 ? match.archer1?.first_name : match.archer2?.first_name;
-                                                }
-                                                const d1 = parseFloat(shootoffArcher1Distance) || 999;
-                                                const d2 = parseFloat(shootoffArcher2Distance) || 999;
-                                                return d1 < d2 ? match.archer1?.first_name : match.archer2?.first_name;
-                                            })()
-                                        }
-                                    </p>
-                                    <p className="text-sm text-slate-600">
-                                        {formatValue(shootoffArcher1Arrow)} vs {formatValue(shootoffArcher2Arrow)}
-                                        {shootoffArcher1Distance && ` | ${shootoffArcher1Distance}cm vs ${shootoffArcher2Distance}cm`}
-                                    </p>
-                                </div>
-                                <Button
-                                    onClick={confirmShootoffWinner}
-                                    disabled={isLoading}
-                                    className="w-full bg-emerald-600 hover:bg-emerald-700"
-                                >
-                                    {isLoading ? <Loader2 className="animate-spin" /> : "Confirmar y Avanzar"}
-                                </Button>
-                            </>
-                        )}
-                    </CardContent>
-                </Card>
-            )}
-
-            {isMatchComplete && (
-                <Card className="bg-emerald-50 border-2 border-emerald-200">
-                    <CardContent className="p-6 text-center">
-                        <div className="inline-flex items-center justify-center p-3 bg-white rounded-full shadow-sm mb-3">
+            {isCompleted ? (
+                <Card className="border-emerald-200 bg-emerald-50 shadow-md">
+                    <CardContent className="py-6 text-center">
+                        <div className="mb-3 inline-flex items-center justify-center rounded-full bg-white p-3 shadow-sm">
                             <Trophy className="h-8 w-8 text-yellow-500" />
                         </div>
-                        <h3 className="text-xl font-black text-emerald-900 mb-1">
-                            ¡Partido Finalizado!
-                        </h3>
-                        <p className="text-emerald-700 font-medium">
-                            Ganador: {match.winner?.first_name} {match.winner?.last_name}
-                        </p>
+                        <h3 className="mb-1 text-xl font-black text-emerald-900">Partido finalizado</h3>
+                        <p className="font-medium text-emerald-700">Ganador: {match.winner?.first_name} {match.winner?.last_name}</p>
                     </CardContent>
                 </Card>
+            ) : (
+                <>
+                    <div className="grid grid-cols-3 gap-2">
+                        {KEYPAD_LAYOUT.flat().map((key) => (
+                            <button
+                                key={key}
+                                type="button"
+                                onClick={() => handleKeypadPress(key === "X" ? 11 : key === "M" ? 0 : parseInt(key, 10))}
+                                className={`h-14 rounded-lg border-b-4 text-2xl font-bold shadow-sm transition-transform active:scale-95 ${KEYPAD_COLORS[key]}`}
+                            >
+                                {key}
+                            </button>
+                        ))}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                        <Button onClick={handleDelete} variant="outline" className="h-12 border-slate-300 text-slate-600 hover:bg-slate-100">
+                            <Eraser className="mr-2 h-5 w-5" />
+                            Borrar Flecha
+                        </Button>
+                        <Button
+                            onClick={handleConfirm}
+                            disabled={!allArrowsFilled || (isShootOffTie && shootOffWinner === null) || isSaving}
+                            className="h-12 bg-green-600 text-lg font-bold shadow-md shadow-green-900/20 hover:bg-green-700 disabled:opacity-50"
+                        >
+                            {isSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Check className="mr-2 h-5 w-5" />}
+                            {isShootOff ? "Confirmar Shoot-off" : "Confirmar Set"}
+                        </Button>
+                    </div>
+                </>
             )}
         </div>
     );

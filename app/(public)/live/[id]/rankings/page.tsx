@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Crown, Medal, Award, Trophy, Swords, RefreshCw } from "lucide-react";
-import { CATEGORY_LABELS, GENDER_LABELS } from "@/lib/constants/categories";
+import { CATEGORY_LABELS } from "@/lib/constants/categories";
 import type { AgeCategory, Gender } from "@/types/database";
 
 interface TournamentResult {
@@ -36,6 +36,44 @@ interface QualificationResult {
     rank: number;
 }
 
+interface MatchArcher {
+    id: string;
+    first_name: string;
+    last_name: string;
+    club: string | null;
+    age_category: AgeCategory;
+    gender: Gender;
+    distance: number;
+}
+
+interface BracketMatchRow {
+    round_number: number;
+    match_position: number;
+    status: string;
+    winner_id: string | null;
+    archer1_id: string | null;
+    archer2_id: string | null;
+    archer1: MatchArcher | null;
+    archer2: MatchArcher | null;
+}
+
+interface BracketRow {
+    category: AgeCategory;
+    gender: Gender;
+    bracket_size: number;
+    matches: BracketMatchRow[] | null;
+}
+
+interface AssignmentRow {
+    id: string;
+    archer: MatchArcher | MatchArcher[] | null;
+}
+
+interface QualificationScoreRow {
+    assignment_id: string;
+    score: number | null;
+}
+
 export default function LiveRankingsPage() {
     const params = useParams();
     const tournamentId = params.id as string;
@@ -47,13 +85,7 @@ export default function LiveRankingsPage() {
     const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
     const [activeTab, setActiveTab] = useState("tournament");
 
-    const fetchData = useCallback(async () => {
-        await Promise.all([fetchTournamentResults(), fetchQualificationResults()]);
-        setLastUpdate(new Date());
-        setIsLoading(false);
-    }, [tournamentId]);
-
-    const fetchTournamentResults = async () => {
+    const fetchTournamentResults = useCallback(async () => {
         const { data: brackets } = await supabase
             .from("elimination_brackets")
             .select(`
@@ -74,8 +106,8 @@ export default function LiveRankingsPage() {
 
         const results: TournamentResult[] = [];
 
-        for (const bracket of brackets) {
-            const matches = (bracket.matches as any[]) || [];
+        for (const bracket of brackets as BracketRow[]) {
+            const matches = bracket.matches || [];
             const totalRounds = Math.log2(bracket.bracket_size);
             const finalRound = totalRounds;
 
@@ -93,7 +125,7 @@ export default function LiveRankingsPage() {
                         lastName: winner.last_name,
                         club: winner.club,
                         ageCategory: bracket.category,
-                        gender: bracket.gender,
+                        gender: winner.gender,
                         distance: winner.distance,
                         position: 1,
                         eliminatedRound: "Oro 🥇",
@@ -106,7 +138,7 @@ export default function LiveRankingsPage() {
                         lastName: loser.last_name,
                         club: loser.club,
                         ageCategory: bracket.category,
-                        gender: bracket.gender,
+                        gender: loser.gender,
                         distance: loser.distance,
                         position: 2,
                         eliminatedRound: "Plata 🥈",
@@ -125,7 +157,7 @@ export default function LiveRankingsPage() {
                         lastName: winner.last_name,
                         club: winner.club,
                         ageCategory: bracket.category,
-                        gender: bracket.gender,
+                        gender: winner.gender,
                         distance: winner.distance,
                         position: 3,
                         eliminatedRound: "Bronce 🥉",
@@ -138,7 +170,7 @@ export default function LiveRankingsPage() {
                         lastName: loser.last_name,
                         club: loser.club,
                         ageCategory: bracket.category,
-                        gender: bracket.gender,
+                        gender: loser.gender,
                         distance: loser.distance,
                         position: 4,
                         eliminatedRound: "4to Lugar",
@@ -153,9 +185,9 @@ export default function LiveRankingsPage() {
         });
 
         setTournamentResults(results);
-    };
+    }, [supabase, tournamentId]);
 
-    const fetchQualificationResults = async () => {
+    const fetchQualificationResults = useCallback(async () => {
         const { data: assignments } = await supabase
             .from("assignments")
             .select(`
@@ -169,9 +201,10 @@ export default function LiveRankingsPage() {
             return;
         }
 
-        const assignmentIds = assignments.map(a => a.id);
+        const assignmentRows = assignments as AssignmentRow[];
+        const assignmentIds = assignmentRows.map((assignment) => assignment.id);
 
-        let allScores: any[] = [];
+        let allScores: QualificationScoreRow[] = [];
         const BATCH_SIZE = 1000;
         let offset = 0;
         let hasMore = true;
@@ -184,7 +217,7 @@ export default function LiveRankingsPage() {
                 .range(offset, offset + BATCH_SIZE - 1);
 
             if (batch && batch.length > 0) {
-                allScores = allScores.concat(batch);
+                allScores = allScores.concat(batch as QualificationScoreRow[]);
                 offset += batch.length;
                 hasMore = batch.length === BATCH_SIZE;
             } else {
@@ -209,11 +242,14 @@ export default function LiveRankingsPage() {
             }
         }
 
-        const results: QualificationResult[] = assignments.map(assignment => {
-            const archer = assignment.archer as any;
+        const results: QualificationResult[] = assignmentRows.flatMap((assignment) => {
+            const archer = Array.isArray(assignment.archer)
+                ? assignment.archer[0]
+                : assignment.archer;
+            if (!archer) return [];
             const stats = scoresByAssignment.get(assignment.id) || { total: 0, xCount: 0, tenPlusX: 0 };
 
-            return {
+            return [{
                 archerId: archer.id,
                 firstName: archer.first_name,
                 lastName: archer.last_name,
@@ -225,16 +261,30 @@ export default function LiveRankingsPage() {
                 xCount: stats.xCount,
                 tenPlusXCount: stats.tenPlusX,
                 rank: 0,
-            };
+            }];
         });
 
         setQualificationResults(results);
-    };
+    }, [supabase, tournamentId]);
+
+    const fetchData = useCallback(async () => {
+        await Promise.all([fetchTournamentResults(), fetchQualificationResults()]);
+        setLastUpdate(new Date());
+        setIsLoading(false);
+    }, [fetchQualificationResults, fetchTournamentResults]);
 
     useEffect(() => {
-        fetchData();
-        const interval = setInterval(fetchData, 60000);
-        return () => clearInterval(interval);
+        const timer = setTimeout(() => {
+            void fetchData();
+        }, 0);
+        const interval = setInterval(() => {
+            void fetchData();
+        }, 60000);
+
+        return () => {
+            clearTimeout(timer);
+            clearInterval(interval);
+        };
     }, [fetchData]);
 
     const getPositionIcon = (position: number) => {
@@ -252,12 +302,13 @@ export default function LiveRankingsPage() {
     };
 
     const getTournamentResultsByCategory = () => {
-        const byCategory = new Map<AgeCategory, TournamentResult[]>();
+        const byCategory = new Map<string, TournamentResult[]>();
         for (const result of tournamentResults) {
-            if (!byCategory.has(result.ageCategory)) {
-                byCategory.set(result.ageCategory, []);
+            const key = `${result.ageCategory}|${result.distance}`;
+            if (!byCategory.has(key)) {
+                byCategory.set(key, []);
             }
-            byCategory.get(result.ageCategory)!.push(result);
+            byCategory.get(key)!.push(result);
         }
         for (const [, results] of byCategory.entries()) {
             results.sort((a, b) => a.position - b.position);
@@ -266,12 +317,13 @@ export default function LiveRankingsPage() {
     };
 
     const getQualificationResultsByCategory = () => {
-        const byCategory = new Map<AgeCategory, QualificationResult[]>();
+        const byCategory = new Map<string, QualificationResult[]>();
         for (const result of qualificationResults) {
-            if (!byCategory.has(result.ageCategory)) {
-                byCategory.set(result.ageCategory, []);
+            const key = `${result.ageCategory}|${result.distance}`;
+            if (!byCategory.has(key)) {
+                byCategory.set(key, []);
             }
-            byCategory.get(result.ageCategory)!.push(result);
+            byCategory.get(key)!.push(result);
         }
         for (const [, results] of byCategory.entries()) {
             results.sort((a, b) => {
@@ -322,13 +374,18 @@ export default function LiveRankingsPage() {
                 {/* Tournament Results */}
                 <TabsContent value="tournament" className="mt-4 space-y-4">
                     {groupedTournament.size > 0 ? (
-                        Array.from(groupedTournament.entries()).map(([category, results]) => (
-                            <Card key={category} className="border-2 border-slate-200 overflow-hidden">
+                        Array.from(groupedTournament.entries()).map(([groupKey, results]) => {
+                            const [category, distance] = groupKey.split("|");
+                            return (
+                            <Card key={groupKey} className="border-2 border-slate-200 overflow-hidden">
                                 <CardHeader className="bg-gradient-to-r from-amber-50 to-yellow-50 border-b border-amber-200 py-2 px-3">
                                     <div className="flex items-center gap-2">
                                         <Crown className="h-4 w-4 text-yellow-600" />
                                         <Badge className="bg-amber-600 text-white text-xs">
-                                            {CATEGORY_LABELS[category] || category}
+                                            {CATEGORY_LABELS[category as AgeCategory] || category}
+                                        </Badge>
+                                        <Badge variant="outline" className="text-xs">
+                                            {distance}m
                                         </Badge>
                                     </div>
                                 </CardHeader>
@@ -372,7 +429,7 @@ export default function LiveRankingsPage() {
                                     </div>
                                 </CardContent>
                             </Card>
-                        ))
+                        )})
                     ) : (
                         <Card className="border-2 border-slate-200">
                             <CardContent className="py-12 text-center">
@@ -389,12 +446,17 @@ export default function LiveRankingsPage() {
                 {/* Qualification Results */}
                 <TabsContent value="qualification" className="mt-4 space-y-4">
                     {groupedQualification.size > 0 ? (
-                        Array.from(groupedQualification.entries()).map(([category, results]) => (
-                            <Card key={category} className="border-2 border-slate-200 overflow-hidden">
+                        Array.from(groupedQualification.entries()).map(([groupKey, results]) => {
+                            const [category, distance] = groupKey.split("|");
+                            return (
+                            <Card key={groupKey} className="border-2 border-slate-200 overflow-hidden">
                                 <CardHeader className="bg-slate-50 border-b border-slate-200 py-2 px-3">
                                     <div className="flex items-center gap-2">
                                         <Badge className="bg-blue-600 text-white text-xs">
-                                            {CATEGORY_LABELS[category] || category}
+                                            {CATEGORY_LABELS[category as AgeCategory] || category}
+                                        </Badge>
+                                        <Badge variant="outline" className="text-xs">
+                                            {distance}m
                                         </Badge>
                                         <span className="text-xs text-slate-500">
                                             {results.length} arquero{results.length !== 1 ? 's' : ''}
@@ -431,7 +493,7 @@ export default function LiveRankingsPage() {
                                     </div>
                                 </CardContent>
                             </Card>
-                        ))
+                        )})
                     ) : (
                         <Card className="border-2 border-slate-200">
                             <CardContent className="py-12 text-center">

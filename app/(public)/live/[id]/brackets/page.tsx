@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useParams } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -48,11 +47,10 @@ interface Bracket {
 export default function LiveBracketsPage() {
     const params = useParams();
     const tournamentId = params.id as string;
-    const supabase = createClient();
 
     const [isLoading, setIsLoading] = useState(true);
     const [brackets, setBrackets] = useState<Bracket[]>([]);
-    const [selectedBracket, setSelectedBracket] = useState<Bracket | null>(null);
+    const [selectedBracketId, setSelectedBracketId] = useState<string | null>(null);
     const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
 
     const fetchBrackets = useCallback(async () => {
@@ -60,39 +58,52 @@ export default function LiveBracketsPage() {
         const data = await response.json();
 
         if (data.brackets) {
-            setBrackets(data.brackets);
-            if (data.brackets.length > 0 && !selectedBracket) {
-                setSelectedBracket(data.brackets[0]);
-            } else if (selectedBracket) {
-                // Update selected bracket with fresh data
-                const updated = data.brackets.find((b: Bracket) => b.id === selectedBracket.id);
-                if (updated) setSelectedBracket(updated);
-            }
+            const nextBrackets = data.brackets as Bracket[];
+            setBrackets(nextBrackets);
+            setSelectedBracketId((prevSelectedId) => {
+                if (nextBrackets.length === 0) return null;
+                if (prevSelectedId && nextBrackets.some((bracket) => bracket.id === prevSelectedId)) {
+                    return prevSelectedId;
+                }
+                return nextBrackets[0].id;
+            });
         }
 
         setLastUpdate(new Date());
         setIsLoading(false);
-    }, [tournamentId, selectedBracket]);
+    }, [tournamentId]);
 
     useEffect(() => {
-        fetchBrackets();
+        let isActive = true;
+        const load = async () => {
+            if (!isActive) return;
+            await fetchBrackets();
+        };
 
-        // Auto-refresh every 60 seconds
-        const interval = setInterval(fetchBrackets, 60000);
-        return () => clearInterval(interval);
-    }, []);
+        void load();
+        const interval = setInterval(() => {
+            void load();
+        }, 60000);
 
-    // Refetch when selected bracket changes (but not on interval)
-    useEffect(() => {
-        if (selectedBracket) {
-            const updated = brackets.find(b => b.id === selectedBracket.id);
-            if (updated) setSelectedBracket(updated);
-        }
-    }, [brackets]);
+        return () => {
+            isActive = false;
+            clearInterval(interval);
+        };
+    }, [fetchBrackets]);
+
+    const selectedBracket =
+        (selectedBracketId
+            ? brackets.find((bracket) => bracket.id === selectedBracketId)
+            : null) || brackets[0] || null;
 
     const getMatchesByRound = (matches: Match[]) => {
         const byRound = new Map<number, Match[]>();
         for (const match of matches) {
+            const isPlayableMatch = Boolean(match.archer1_id && match.archer2_id);
+            if (!isPlayableMatch) {
+                continue;
+            }
+
             if (!byRound.has(match.round_number)) {
                 byRound.set(match.round_number, []);
             }
@@ -153,7 +164,7 @@ export default function LiveBracketsPage() {
                 {brackets.map((bracket) => (
                     <button
                         key={bracket.id}
-                        onClick={() => setSelectedBracket(bracket)}
+                        onClick={() => setSelectedBracketId(bracket.id)}
                         className={cn(
                             "flex-shrink-0 px-3 py-2 rounded-lg border-2 transition-all",
                             selectedBracket?.id === bracket.id
@@ -213,8 +224,8 @@ export default function LiveBracketsPage() {
                                 <CardContent className="p-0">
                                     <div className="divide-y divide-slate-100">
                                         {matches.map((match) => {
-                                            const isArcher1Winner = match.winner_id === match.archer1_id;
-                                            const isArcher2Winner = match.winner_id === match.archer2_id;
+                                            const isArcher1Winner = Boolean(match.archer1_id) && match.winner_id === match.archer1_id;
+                                            const isArcher2Winner = Boolean(match.archer2_id) && match.winner_id === match.archer2_id;
 
                                             return (
                                                 <div key={match.id} className="p-3">

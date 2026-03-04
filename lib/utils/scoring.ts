@@ -84,8 +84,7 @@ export function needsShootoff(archer1Points: number, archer2Points: number): boo
  * Groups qualification scores by end
  */
 export function groupScoresByEnd(
-    scores: QualificationScore[],
-    arrowsPerEnd: number
+    scores: QualificationScore[]
 ): Map<number, QualificationScore[]> {
     const ends = new Map<number, QualificationScore[]>();
 

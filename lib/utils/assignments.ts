@@ -1,5 +1,5 @@
 // Assignment algorithm - distributes archers to targets
-import type { Archer, Target, Assignment, AgeCategory, Gender, TargetPosition, ShootingTurn } from "@/types/database";
+import type { Archer, TargetPosition, ShootingTurn } from "@/types/database";
 import { getDistance } from "@/lib/constants/categories";
 
 interface ArcherWithDistance extends Archer {

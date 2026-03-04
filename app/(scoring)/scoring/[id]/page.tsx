@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -30,6 +30,31 @@ const KEYPAD_LAYOUT = [
     ["2", "1", "M"],
 ];
 
+interface ScoringAssignment {
+    id: string;
+    position: string;
+    turn: string;
+    current_end: number;
+    is_finished?: boolean;
+    archer: {
+        first_name: string;
+        last_name: string;
+        age_category: string;
+    };
+    target: {
+        id: string;
+        target_number: number;
+        distance: number;
+        tournament_id: string;
+    };
+    tournament: {
+        name: string;
+        arrows_per_end: number;
+        qualification_arrows: number;
+        ends_per_round?: number;
+    };
+}
+
 export default function ScoringPage() {
     const params = useParams();
     const searchParams = useSearchParams();
@@ -39,7 +64,7 @@ export default function ScoringPage() {
     const supabase = createClient();
 
     const [isLoading, setIsLoading] = useState(true);
-    const [assignment, setAssignment] = useState<any | null>(null);
+    const [assignment, setAssignment] = useState<ScoringAssignment | null>(null);
     const [currentEnd, setCurrentEnd] = useState(1);
 
     // Data State
@@ -50,14 +75,6 @@ export default function ScoringPage() {
     const [isSaving, setIsSaving] = useState(false);
     const [cursor, setCursor] = useState(0);
     const scrollRef = useRef<HTMLDivElement>(null);
-
-    // Color helpers
-    const getCellColor = (val: number | null, isSelected: boolean) => {
-        if (isSelected) return "bg-[#FFD700] ring-2 ring-yellow-600 text-black font-bold z-10"; // Highlight active cell (Yellow/Gold)
-        if (val === null) return "bg-white";
-        // Standard colors for display
-        return ""; // We will style text/bg differently for table
-    };
 
     const getScoreColorClass = (val: number | null) => {
         if (val === null) return "text-slate-400";
@@ -78,10 +95,6 @@ export default function ScoringPage() {
     };
 
 
-    useEffect(() => {
-        fetchAssignment();
-    }, [assignmentId]);
-
     // Scroll to current end on load/update
     useEffect(() => {
         if (scrollRef.current) {
@@ -94,15 +107,15 @@ export default function ScoringPage() {
     }, [currentEnd, isLoading]);
 
 
-    const fetchAssignment = async () => {
+    const fetchAssignment = useCallback(async () => {
         setIsLoading(true);
 
         const { data: assignmentData, error } = await supabase
             .from("assignments")
             .select(`
-                id, position, turn, current_end,
+                id, position, turn, current_end, is_finished,
                 archer:archers(first_name, last_name, age_category),
-                target:targets(target_number, distance, tournament_id)
+                target:targets(id, target_number, distance, tournament_id)
             `)
             .eq("id", assignmentId)
             .single();
@@ -115,13 +128,13 @@ export default function ScoringPage() {
 
         const { data: tournament } = await supabase
             .from("tournaments")
-            .select("name, arrows_per_end, qualification_arrows")
-            .eq("id", (assignmentData.target as any).tournament_id)
+            .select("name, arrows_per_end, qualification_arrows, ends_per_round")
+            .eq("id", assignmentData.target.tournament_id)
             .single();
 
-        const fullAssignment = {
+        const fullAssignment: ScoringAssignment = {
             ...assignmentData,
-            tournament: tournament || { name: "Torneo", arrows_per_end: 6, qualification_arrows: 72 }
+            tournament: tournament || { name: "Torneo", arrows_per_end: 6, qualification_arrows: 72, ends_per_round: 6 }
         };
 
         setAssignment(fullAssignment);
@@ -159,38 +172,53 @@ export default function ScoringPage() {
         }
 
         setIsLoading(false);
-    };
+    }, [assignmentId, supabase]);
+
+    useEffect(() => {
+        void fetchAssignment();
+    }, [fetchAssignment]);
 
     const handleKeypadPress = (key: string) => {
+        if (assignment?.is_finished) return;
+
         let val: number;
         if (key === "M") val = 0;
         else if (key === "X") val = 11; // Display as X, Value 11 (counts as 10)
         else val = parseInt(key);
 
+        if (cursor >= arrows.length) return;
+        if (arrows[cursor] !== null) return;
+
         const newArrows = [...arrows];
-        if (cursor < arrows.length) {
-            newArrows[cursor] = val;
-            setArrows(newArrows);
-            if (cursor < arrows.length) {
-                setCursor(cursor + 1);
-            }
-        }
+        newArrows[cursor] = val;
+        setArrows(newArrows);
+        setCursor(cursor + 1);
     };
 
     const handleConfirm = async () => {
-        if (!assignment) return;
+        if (!assignment || assignment.is_finished) return;
 
         const { arrows_per_end, qualification_arrows } = assignment.tournament;
         const totalEnds = Math.ceil(qualification_arrows / arrows_per_end);
         const isLastEnd = currentEnd >= totalEnds;
+        const endsPerRound =
+            assignment.tournament.ends_per_round && assignment.tournament.ends_per_round > 0
+                ? assignment.tournament.ends_per_round
+                : Math.max(1, Math.ceil(qualification_arrows / arrows_per_end));
+        const roundNumber = Math.floor((currentEnd - 1) / endsPerRound) + 1;
+        const endInRound = ((currentEnd - 1) % endsPerRound) + 1;
 
         setIsSaving(true);
         try {
             await supabase.from("qualification_scores").delete()
-                .eq("assignment_id", assignmentId).eq("end_number", currentEnd);
+                .eq("assignment_id", assignmentId)
+                .eq("round_number", roundNumber)
+                .eq("end_in_round", endInRound);
 
             const scoresToInsert = arrows.map((score, index) => ({
                 assignment_id: assignmentId,
+                round_number: roundNumber,
+                end_in_round: endInRound,
                 end_number: currentEnd,
                 arrow_number: index + 1,
                 score: score === null ? 0 : score,
@@ -198,6 +226,34 @@ export default function ScoringPage() {
 
             const { error } = await supabase.from("qualification_scores").insert(scoresToInsert);
             if (error) throw error;
+
+            const endTotal = arrows.reduce<number>(
+                (sum, score) => sum + (score === 11 ? 10 : (score ?? 0)),
+                0
+            );
+            const tenPlusXCount = arrows.filter((score) => score === 10 || score === 11).length;
+            const xCount = arrows.filter((score) => score === 11).length;
+            const arrowsShot = arrows.filter((score) => score !== null).length;
+
+            const { error: endError } = await supabase
+                .from("qualification_ends")
+                .upsert(
+                    {
+                        assignment_id: assignmentId,
+                        round_number: roundNumber,
+                        end_in_round: endInRound,
+                        end_number: currentEnd,
+                        end_total: endTotal,
+                        ten_plus_x_count: tenPlusXCount,
+                        x_count: xCount,
+                        arrows_shot: arrowsShot,
+                        is_confirmed: true,
+                        confirmed_at: new Date().toISOString(),
+                    },
+                    { onConflict: "assignment_id,round_number,end_in_round" }
+                );
+
+            if (endError) throw endError;
 
             // Check if this is the last end
             if (isLastEnd) {
@@ -212,15 +268,16 @@ export default function ScoringPage() {
                 });
 
                 // Check if ALL archers on this target are now finished
-                const currentTargetId = targetId || (assignment.target as any).id;
+                const currentTargetId = targetId || assignment.target.id;
 
                 const { data: otherAssignments } = await supabase
                     .from("assignments")
                     .select("id, is_finished")
                     .eq("target_id", currentTargetId);
 
-                const allFinished = (otherAssignments || []).every(a =>
-                    a.id === assignmentId ? true : a.is_finished
+                const allFinished = (otherAssignments || []).every(
+                    (otherAssignment: { id: string; is_finished: boolean }) =>
+                        otherAssignment.id === assignmentId ? true : otherAssignment.is_finished
                 );
 
                 if (allFinished) {
@@ -249,16 +306,18 @@ export default function ScoringPage() {
                     setIsSaving(false);
                 }
             }
-        } catch (error: any) {
-            toast.error("Error", { description: error.message });
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : "Error interno";
+            toast.error("Error", { description: message });
             setIsSaving(false);
         }
     };
 
     const handleDeleteArrow = () => {
+        if (assignment?.is_finished) return;
+
         if (cursor > 0) {
             const newArrows = [...arrows];
-            const target = Math.min(cursor, arrows.length - 1);
 
             if (arrows[cursor] !== null && cursor < arrows.length) {
                 newArrows[cursor] = null;
@@ -386,7 +445,9 @@ export default function ScoringPage() {
                                         return (
                                             <div key={slotIdx} className="p-0.5">
                                                 <button
-                                                    onClick={() => setCursor(slotIdx)}
+                                                    onClick={() => {
+                                                        if (!assignment.is_finished) setCursor(slotIdx);
+                                                    }}
                                                     className={`
                                                         w-full aspect-square rounded flex items-center justify-center text-lg font-bold border
                                                         ${isSelected
@@ -437,9 +498,10 @@ export default function ScoringPage() {
                             <button
                                 key={key}
                                 onClick={() => handleKeypadPress(key)}
+                                disabled={assignment.is_finished}
                                 className={`
                                     h-14 rounded-lg text-2xl font-bold shadow-sm active:scale-95 transition-transform border-b-4
-                                    ${KEYPAD_COLORS[key]}
+                                    ${KEYPAD_COLORS[key]} disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100
                                 `}
                             >
                                 {key}
@@ -453,6 +515,7 @@ export default function ScoringPage() {
                         <Button
                             onClick={handleDeleteArrow}
                             variant="outline"
+                            disabled={assignment.is_finished}
                             className="h-12 border-slate-300 text-slate-600 hover:bg-slate-100"
                         >
                             <Eraser className="w-5 h-5 mr-2" />
@@ -463,7 +526,7 @@ export default function ScoringPage() {
                         {arrows.every(a => a !== null) ? (
                             <Button
                                 onClick={handleConfirm}
-                                disabled={isSaving}
+                                disabled={isSaving || assignment.is_finished}
                                 className="h-12 text-lg font-bold bg-green-600 hover:bg-green-700 shadow-md shadow-green-900/20"
                             >
                                 {isSaving ? <Loader2 className="animate-spin mr-2" /> : <CheckCircle2 className="mr-2 h-5 w-5" />}

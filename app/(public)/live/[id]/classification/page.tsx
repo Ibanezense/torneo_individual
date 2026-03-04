@@ -1,13 +1,18 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { RefreshCw, Trophy, Medal, Award, ChevronDown, ChevronRight } from "lucide-react";
-import { CATEGORY_LABELS, GENDER_LABELS } from "@/lib/constants/categories";
-import type { AgeCategory, Gender } from "@/types/database";
+import {
+    AGE_CATEGORY_OPTIONS,
+    CATEGORY_LABELS,
+    DIVISION_LABELS,
+    TOURNAMENT_DIVISION_OPTIONS,
+} from "@/lib/constants/categories";
+import type { AgeCategory, Gender, TournamentDivision } from "@/types/database";
 
 interface EndScore {
     endNumber: number;
@@ -23,6 +28,7 @@ interface RankedArcher {
     club: string | null;
     ageCategory: AgeCategory;
     gender: Gender;
+    division: TournamentDivision;
     distance: number;
     totalScore: number;
     xCount: number;
@@ -32,32 +38,94 @@ interface RankedArcher {
     endScores: EndScore[];
 }
 
+interface AssignmentRow {
+    id: string;
+    archer:
+    | {
+        id: string;
+        first_name: string;
+        last_name: string;
+        club: string | null;
+        age_category: AgeCategory;
+        gender: Gender;
+        division: TournamentDivision;
+        distance: number;
+    }
+    | {
+        id: string;
+        first_name: string;
+        last_name: string;
+        club: string | null;
+        age_category: AgeCategory;
+        gender: Gender;
+        division: TournamentDivision;
+        distance: number;
+    }[]
+    | null;
+}
+
+interface ScoreRow {
+    assignment_id: string;
+    end_number: number;
+    arrow_number: number;
+    score: number | null;
+}
+
+interface TournamentConfig {
+    arrowsPerEnd: number;
+    distances: number[];
+    categories: AgeCategory[];
+    divisions: TournamentDivision[];
+}
+
+interface RankingGroup {
+    key: string;
+    division: TournamentDivision;
+    category: AgeCategory;
+    distance: number;
+    archers: RankedArcher[];
+}
+
 export default function LiveClassificationPage() {
     const params = useParams();
     const tournamentId = params.id as string;
-    const supabase = createClient();
+    const supabase = useMemo(() => createClient(), []);
 
     const [isLoading, setIsLoading] = useState(true);
     const [rankings, setRankings] = useState<RankedArcher[]>([]);
     const [expandedArchers, setExpandedArchers] = useState<Set<string>>(new Set());
     const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
-    const [arrowsPerEnd, setArrowsPerEnd] = useState(6);
+    const [tournamentConfig, setTournamentConfig] = useState<TournamentConfig | null>(null);
 
     const fetchRankings = useCallback(async () => {
         const { data: tournament } = await supabase
             .from("tournaments")
-            .select("id, arrows_per_end")
+            .select("id, arrows_per_end, distances, categories, divisions")
             .eq("id", tournamentId)
             .single();
 
-        if (!tournament) return;
-        setArrowsPerEnd(tournament.arrows_per_end);
+        if (!tournament) {
+            setIsLoading(false);
+            return;
+        }
+        setTournamentConfig({
+            arrowsPerEnd: tournament.arrows_per_end,
+            distances: Array.isArray(tournament.distances) ? tournament.distances : [],
+            categories:
+                Array.isArray(tournament.categories) && tournament.categories.length > 0
+                    ? (tournament.categories as AgeCategory[])
+                    : AGE_CATEGORY_OPTIONS,
+            divisions:
+                Array.isArray(tournament.divisions) && tournament.divisions.length > 0
+                    ? (tournament.divisions as TournamentDivision[])
+                    : TOURNAMENT_DIVISION_OPTIONS,
+        });
 
         const { data: assignments } = await supabase
             .from("assignments")
             .select(`
                 id,
-                archer:archers(id, first_name, last_name, club, age_category, gender, distance)
+                archer:archers(id, first_name, last_name, club, age_category, gender, division, distance)
             `)
             .eq("tournament_id", tournamentId);
 
@@ -67,10 +135,11 @@ export default function LiveClassificationPage() {
             return;
         }
 
-        const assignmentIds = assignments.map(a => a.id);
+        const assignmentRows = assignments as AssignmentRow[];
+        const assignmentIds = assignmentRows.map((assignment) => assignment.id);
 
         // Fetch ALL scores using pagination
-        let allScores: any[] = [];
+        let allScores: ScoreRow[] = [];
         const BATCH_SIZE = 1000;
         let offset = 0;
         let hasMore = true;
@@ -86,7 +155,7 @@ export default function LiveClassificationPage() {
                 .range(offset, offset + BATCH_SIZE - 1);
 
             if (batch && batch.length > 0) {
-                allScores = allScores.concat(batch);
+                allScores = allScores.concat(batch as ScoreRow[]);
                 offset += batch.length;
                 hasMore = batch.length === BATCH_SIZE;
             } else {
@@ -106,8 +175,11 @@ export default function LiveClassificationPage() {
             endMap.get(score.end_number)![score.arrow_number - 1] = score.score;
         }
 
-        const rankedArchers: RankedArcher[] = assignments.map(assignment => {
-            const archer = assignment.archer as any;
+        const rankedArchers: RankedArcher[] = assignmentRows.flatMap((assignment) => {
+            const archer = Array.isArray(assignment.archer)
+                ? assignment.archer[0]
+                : assignment.archer;
+            if (!archer) return [];
             const endMap = scoresByAssignment.get(assignment.id) || new Map();
 
             const endScores: EndScore[] = [];
@@ -136,6 +208,7 @@ export default function LiveClassificationPage() {
                 club: archer.club,
                 ageCategory: archer.age_category,
                 gender: archer.gender,
+                division: archer.division,
                 distance: archer.distance,
                 totalScore,
                 xCount,
@@ -152,11 +225,19 @@ export default function LiveClassificationPage() {
     }, [tournamentId, supabase]);
 
     useEffect(() => {
-        fetchRankings();
+        const initialTimer = setTimeout(() => {
+            void fetchRankings();
+        }, 0);
 
         // Auto-refresh every 60 seconds
-        const interval = setInterval(fetchRankings, 60000);
-        return () => clearInterval(interval);
+        const interval = setInterval(() => {
+            void fetchRankings();
+        }, 60000);
+
+        return () => {
+            clearTimeout(initialTimer);
+            clearInterval(interval);
+        };
     }, [fetchRankings]);
 
     const toggleExpanded = (archerId: string) => {
@@ -196,30 +277,90 @@ export default function LiveClassificationPage() {
         return "bg-white text-slate-400 border-slate-200";
     };
 
-    const getRankingsByCategory = () => {
-        const byCategory = new Map<AgeCategory, RankedArcher[]>();
+    const getRankingsByCombination = () => {
+        const byCombination = new Map<string, RankingGroup>();
+
         for (const archer of rankings) {
-            if (!byCategory.has(archer.ageCategory)) {
-                byCategory.set(archer.ageCategory, []);
+            const key = `${archer.division}|${archer.ageCategory}|${archer.distance}`;
+            if (!byCombination.has(key)) {
+                byCombination.set(key, {
+                    key,
+                    division: archer.division,
+                    category: archer.ageCategory,
+                    distance: archer.distance,
+                    archers: [],
+                });
             }
-            byCategory.get(archer.ageCategory)!.push(archer);
+            byCombination.get(key)!.archers.push(archer);
         }
 
-        for (const [, archers] of byCategory.entries()) {
-            archers.sort((a, b) => {
+        for (const group of byCombination.values()) {
+            const sorted = [...group.archers].sort((a, b) => {
                 if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
                 if (b.tenPlusXCount !== a.tenPlusXCount) return b.tenPlusXCount - a.tenPlusXCount;
                 return b.xCount - a.xCount;
             });
-            archers.forEach((archer, index) => {
-                archer.rank = index + 1;
-            });
+            group.archers = sorted.map((archer, index) => ({
+                ...archer,
+                rank: index + 1,
+            }));
         }
 
-        return byCategory;
+        const configuredDivisions =
+            tournamentConfig?.divisions && tournamentConfig.divisions.length > 0
+                ? tournamentConfig.divisions
+                : TOURNAMENT_DIVISION_OPTIONS;
+        const configuredCategories =
+            tournamentConfig?.categories && tournamentConfig.categories.length > 0
+                ? tournamentConfig.categories
+                : AGE_CATEGORY_OPTIONS;
+        const configuredDistances =
+            tournamentConfig?.distances && tournamentConfig.distances.length > 0
+                ? tournamentConfig.distances
+                : Array.from(new Set(rankings.map((ranking) => ranking.distance))).sort((a, b) => a - b);
+
+        const orderedGroups: RankingGroup[] = [];
+        const usedKeys = new Set<string>();
+
+        for (const division of configuredDivisions) {
+            for (const category of configuredCategories) {
+                for (const distance of configuredDistances) {
+                    const key = `${division}|${category}|${distance}`;
+                    const group = byCombination.get(key);
+                    if (group) {
+                        orderedGroups.push(group);
+                        usedKeys.add(key);
+                    }
+                }
+            }
+        }
+
+        const divisionOrder = new Map(
+            configuredDivisions.map((value, index) => [value, index] as const)
+        );
+        const categoryOrder = new Map(
+            configuredCategories.map((value, index) => [value, index] as const)
+        );
+        const remainingGroups = Array.from(byCombination.values())
+            .filter((group) => !usedKeys.has(group.key))
+            .sort((a, b) => {
+                const divisionDiff =
+                    (divisionOrder.get(a.division) ?? Number.MAX_SAFE_INTEGER) -
+                    (divisionOrder.get(b.division) ?? Number.MAX_SAFE_INTEGER);
+                if (divisionDiff !== 0) return divisionDiff;
+
+                const categoryDiff =
+                    (categoryOrder.get(a.category) ?? Number.MAX_SAFE_INTEGER) -
+                    (categoryOrder.get(b.category) ?? Number.MAX_SAFE_INTEGER);
+                if (categoryDiff !== 0) return categoryDiff;
+
+                return a.distance - b.distance;
+            });
+
+        return [...orderedGroups, ...remainingGroups];
     };
 
-    const groupedRankings = getRankingsByCategory();
+    const groupedRankings = getRankingsByCombination();
 
     if (isLoading) {
         return (
@@ -240,22 +381,28 @@ export default function LiveClassificationPage() {
                 </div>
             </div>
 
-            {groupedRankings.size > 0 ? (
-                Array.from(groupedRankings.entries()).map(([category, archers]) => (
-                    <Card key={category} className="border-2 border-slate-200 shadow-sm overflow-hidden">
+            {groupedRankings.length > 0 ? (
+                groupedRankings.map((group) => (
+                    <Card key={group.key} className="border-2 border-slate-200 shadow-sm overflow-hidden">
                         <div className="bg-slate-50 border-b border-slate-200 py-2 px-3">
                             <div className="flex items-center gap-2">
                                 <Badge className="bg-blue-600 text-white text-xs">
-                                    {CATEGORY_LABELS[category] || category}
+                                    {DIVISION_LABELS[group.division] || group.division}
+                                </Badge>
+                                <Badge className="bg-slate-700 text-white text-xs">
+                                    {CATEGORY_LABELS[group.category] || group.category}
+                                </Badge>
+                                <Badge className="bg-emerald-600 text-white text-xs">
+                                    {group.distance}m
                                 </Badge>
                                 <span className="text-slate-500 text-xs">
-                                    {archers.length} arquero{archers.length !== 1 ? 's' : ''}
+                                    {group.archers.length} arquero{group.archers.length !== 1 ? "s" : ""}
                                 </span>
                             </div>
                         </div>
                         <CardContent className="p-0">
                             <div className="divide-y divide-slate-100">
-                                {archers.map((archer) => {
+                                {group.archers.map((archer) => {
                                     const isExpanded = expandedArchers.has(archer.archerId);
                                     return (
                                         <div key={archer.archerId}>

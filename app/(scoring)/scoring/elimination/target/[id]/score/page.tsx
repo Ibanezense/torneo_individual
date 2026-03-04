@@ -1,13 +1,14 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Loader2, ArrowLeft, Check, RotateCcw } from "lucide-react";
+import { ArrowLeft, Check, Eraser, Loader2, Radio } from "lucide-react";
 import { toast } from "sonner";
 import { SET_SYSTEM } from "@/lib/constants/world-archery";
+import { resolvePendingByeAdvances } from "@/lib/utils/elimination-advancement";
 
 interface MatchData {
     id: string;
@@ -24,11 +25,7 @@ interface MatchData {
     target_id: string;
     archer1: { id: string; first_name: string; last_name: string };
     archer2: { id: string; first_name: string; last_name: string };
-    bracket: {
-        id: string;
-        tournament_id: string;
-        tournament: { elimination_arrows_per_set: number; points_to_win_match: number };
-    };
+    bracket: { id: string; tournament_id: string; tournament: { elimination_arrows_per_set: number; points_to_win_match: number } };
 }
 
 interface SetData {
@@ -39,9 +36,50 @@ interface SetData {
     archer1_set_result: number | null;
     archer2_set_result: number | null;
     is_confirmed: boolean;
+    is_shootoff?: boolean | null;
 }
 
-const SCORE_VALUES = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+const KEYPAD_COLORS: Record<string, string> = {
+    X: "bg-[#FFE55C] text-black border-[#E6CE45]",
+    "10": "bg-[#FFE55C] text-black border-[#E6CE45]",
+    "9": "bg-[#FFE55C] text-black border-[#E6CE45]",
+    "8": "bg-[#FF5C5C] text-white border-[#E64545]",
+    "7": "bg-[#FF5C5C] text-white border-[#E64545]",
+    "6": "bg-[#5C9DFF] text-white border-[#4589E6]",
+    "5": "bg-[#5C9DFF] text-white border-[#4589E6]",
+    "4": "bg-slate-900 text-white border-black",
+    "3": "bg-slate-900 text-white border-black",
+    "2": "bg-slate-200 text-black border-slate-300",
+    "1": "bg-slate-200 text-black border-slate-300",
+    M: "bg-slate-200 text-slate-500 border-slate-300",
+};
+
+const KEYPAD_LAYOUT = [["X", "10", "9"], ["8", "7", "6"], ["5", "4", "3"], ["2", "1", "M"]];
+
+const displayScore = (score: number | null) => {
+    if (score === null) return "";
+    if (score === 11) return "X";
+    if (score === 0) return "M";
+    return String(score);
+};
+
+const scoreValue = (score: number | null) => {
+    if (score === null) return 0;
+    return score === 11 ? 10 : score;
+};
+
+const getArrowColor = (score: number | null, active: boolean) => {
+    const activeRing = active ? " ring-2 ring-sky-500 ring-offset-1 scale-[1.02]" : "";
+    if (score === null) return `bg-slate-100 text-slate-400 ring-1 ring-slate-200${activeRing}`;
+    if (score === 11 || score === 10 || score === 9) return `bg-yellow-300 text-slate-900${activeRing}`;
+    if (score === 8 || score === 7) return `bg-red-500 text-white${activeRing}`;
+    if (score === 6 || score === 5) return `bg-sky-400 text-white${activeRing}`;
+    if (score === 4 || score === 3) return `bg-slate-700 text-white${activeRing}`;
+    if (score === 2 || score === 1) return `bg-white text-slate-800 ring-1 ring-slate-300${activeRing}`;
+    return `bg-slate-200 text-slate-500${activeRing}`;
+};
+
+const cloneArrows = (values?: number[], size = 3) => Array.from({ length: size }, (_, index) => values?.[index] ?? null);
 
 export default function EliminationSetScorerPage() {
     const params = useParams();
@@ -54,19 +92,27 @@ export default function EliminationSetScorerPage() {
     const [match, setMatch] = useState<MatchData | null>(null);
     const [sets, setSets] = useState<SetData[]>([]);
     const [currentSetNumber, setCurrentSetNumber] = useState(1);
-
     const [archer1Arrows, setArcher1Arrows] = useState<(number | null)[]>([null, null, null]);
     const [archer2Arrows, setArcher2Arrows] = useState<(number | null)[]>([null, null, null]);
     const [activeArcher, setActiveArcher] = useState<1 | 2>(1);
     const [activeCursor, setActiveCursor] = useState(0);
+    const [shootOffWinner, setShootOffWinner] = useState<1 | 2 | null>(null);
 
-    useEffect(() => {
-        fetchData();
-    }, [targetId]);
+    const isShootOff = match?.status === "shootoff";
+    const arrowSlots = isShootOff ? 1 : 3;
 
-    const fetchData = async () => {
+    const confirmedSets = useMemo(
+        () => sets.filter((setRow) => setRow.is_confirmed && !setRow.is_shootoff).sort((a, b) => a.set_number - b.set_number),
+        [sets]
+    );
+
+    const shootOffSet = useMemo(
+        () => sets.find((setRow) => setRow.is_shootoff || setRow.set_number === 99) || null,
+        [sets]
+    );
+
+    const fetchData = useCallback(async () => {
         setIsLoading(true);
-
         const { data: matchData, error: matchError } = await supabase
             .from("elimination_matches")
             .select(`
@@ -87,74 +133,64 @@ export default function EliminationSetScorerPage() {
             return;
         }
 
-        setMatch(matchData as unknown as MatchData);
-
         if (matchData.status === "pending") {
-            await supabase
-                .from("elimination_matches")
-                .update({ status: "in_progress" })
-                .eq("id", matchData.id);
+            await supabase.from("elimination_matches").update({ status: "in_progress" }).eq("id", matchData.id);
+            matchData.status = "in_progress";
         }
 
-        const { data: setsData } = await supabase
-            .from("sets")
-            .select("*")
-            .eq("match_id", matchData.id)
-            .order("set_number");
+        const { data: setsData } = await supabase.from("sets").select("*").eq("match_id", matchData.id).order("set_number");
+        const nextSets = (setsData || []) as SetData[];
+        const confirmedRegulationSets = nextSets.filter((setRow) => setRow.is_confirmed && !setRow.is_shootoff);
+        const realArcher1Points = confirmedRegulationSets.reduce((sum, setRow) => sum + (setRow.archer1_set_result || 0), 0);
+        const realArcher2Points = confirmedRegulationSets.reduce((sum, setRow) => sum + (setRow.archer2_set_result || 0), 0);
 
-        if (setsData) {
-            setSets(setsData);
-            const confirmedSets = setsData.filter(s => s.is_confirmed);
-            const lastConfirmedSet = confirmedSets.length;
-            setCurrentSetNumber(lastConfirmedSet + 1);
+        setSets(nextSets);
+        setMatch({ ...(matchData as unknown as MatchData), archer1_set_points: realArcher1Points, archer2_set_points: realArcher2Points });
 
-            // Calculate real points from confirmed sets
-            const realArcher1Points = confirmedSets.reduce((sum, s) => sum + (s.archer1_set_result || 0), 0);
-            const realArcher2Points = confirmedSets.reduce((sum, s) => sum + (s.archer2_set_result || 0), 0);
-
-            // Update match state with real points (in case DB was out of sync)
-            const updatedMatch = {
-                ...(matchData as unknown as MatchData),
-                archer1_set_points: realArcher1Points,
-                archer2_set_points: realArcher2Points,
-            };
-            setMatch(updatedMatch);
-
-            // Sync database if out of sync
-            if (realArcher1Points !== matchData.archer1_set_points || realArcher2Points !== matchData.archer2_set_points) {
-                console.log("Syncing match points:", { realArcher1Points, realArcher2Points });
-                await supabase
-                    .from("elimination_matches")
-                    .update({
-                        archer1_set_points: realArcher1Points,
-                        archer2_set_points: realArcher2Points,
-                    })
-                    .eq("id", matchData.id);
-            }
-
-            const currentSet = setsData.find(s => !s.is_confirmed);
-            if (currentSet) {
-                setArcher1Arrows(currentSet.archer1_arrows.length > 0 ? currentSet.archer1_arrows : [null, null, null]);
-                setArcher2Arrows(currentSet.archer2_arrows.length > 0 ? currentSet.archer2_arrows : [null, null, null]);
-            }
+        if (matchData.status === "shootoff") {
+            const currentShootOff = nextSets.find((setRow) => setRow.is_shootoff || setRow.set_number === 99);
+            setCurrentSetNumber(99);
+            setArcher1Arrows(cloneArrows(currentShootOff?.archer1_arrows, 1));
+            setArcher2Arrows(cloneArrows(currentShootOff?.archer2_arrows, 1));
+        } else {
+            setCurrentSetNumber(confirmedRegulationSets.length + 1);
+            setArcher1Arrows([null, null, null]);
+            setArcher2Arrows([null, null, null]);
         }
 
+        setActiveArcher(1);
+        setActiveCursor(0);
+        setShootOffWinner(null);
         setIsLoading(false);
-    };
+    }, [supabase, targetId]);
+
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            void fetchData();
+        }, 0);
+        return () => clearTimeout(timer);
+    }, [fetchData]);
 
     const handleKeypadPress = (value: number) => {
+        const maxIndex = arrowSlots - 1;
         if (activeArcher === 1) {
-            const newArrows = [...archer1Arrows];
-            newArrows[activeCursor] = value;
-            setArcher1Arrows(newArrows);
-            if (activeCursor < 2) setActiveCursor(activeCursor + 1);
-            else { setActiveArcher(2); setActiveCursor(0); }
-        } else {
-            const newArrows = [...archer2Arrows];
-            newArrows[activeCursor] = value;
-            setArcher2Arrows(newArrows);
-            if (activeCursor < 2) setActiveCursor(activeCursor + 1);
+            if (archer1Arrows[Math.min(activeCursor, maxIndex)] !== null) return;
+            const next = [...archer1Arrows];
+            next[Math.min(activeCursor, maxIndex)] = value;
+            setArcher1Arrows(next);
+            if (activeCursor < maxIndex) setActiveCursor(activeCursor + 1);
+            else {
+                setActiveArcher(2);
+                setActiveCursor(0);
+            }
+            return;
         }
+
+        if (archer2Arrows[Math.min(activeCursor, maxIndex)] !== null) return;
+        const next = [...archer2Arrows];
+        next[Math.min(activeCursor, maxIndex)] = value;
+        setArcher2Arrows(next);
+        if (activeCursor < maxIndex) setActiveCursor(activeCursor + 1);
     };
 
     const handleCellClick = (archer: 1 | 2, index: number) => {
@@ -163,72 +199,205 @@ export default function EliminationSetScorerPage() {
     };
 
     const handleDelete = () => {
-        if (activeArcher === 1) {
-            const newArrows = [...archer1Arrows];
-            newArrows[activeCursor] = null;
-            setArcher1Arrows(newArrows);
-            if (activeCursor > 0) setActiveCursor(activeCursor - 1);
-        } else {
-            const newArrows = [...archer2Arrows];
-            newArrows[activeCursor] = null;
-            setArcher2Arrows(newArrows);
-            if (activeCursor > 0) setActiveCursor(activeCursor - 1);
-            else { setActiveArcher(1); setActiveCursor(2); }
+        const deleteFrom = (
+            values: (number | null)[],
+            setValues: (values: (number | null)[]) => void,
+            fallback?: () => void
+        ) => {
+            const next = [...values];
+            let index = Math.min(activeCursor, arrowSlots - 1);
+            if (next[index] === null) {
+                index = Array.from({ length: arrowSlots }, (_, i) => i).reverse().find((i) => next[i] !== null) ?? -1;
+            }
+            if (index === -1) {
+                fallback?.();
+                return;
+            }
+            next[index] = null;
+            setValues(next);
+            setActiveCursor(Math.max(index - 1, 0));
+        };
+
+        if (activeArcher === 2) {
+            deleteFrom(archer2Arrows, setArcher2Arrows, () => {
+                setActiveArcher(1);
+                setActiveCursor(Math.max(arrowSlots - 1, 0));
+            });
+            return;
         }
+
+        deleteFrom(archer1Arrows, setArcher1Arrows);
     };
 
-    const calculateTotal = (arrows: (number | null)[]): number => {
-        return arrows.reduce<number>((sum, a) => sum + (a === 11 ? 10 : (a ?? 0)), 0);
+    const archer1Total = archer1Arrows
+        .slice(0, arrowSlots)
+        .reduce((sum: number, arrow: number | null) => sum + scoreValue(arrow), 0);
+    const archer2Total = archer2Arrows
+        .slice(0, arrowSlots)
+        .reduce((sum: number, arrow: number | null) => sum + scoreValue(arrow), 0);
+
+    const allArrowsFilled = useMemo(
+        () =>
+            archer1Arrows.slice(0, arrowSlots).every((arrow) => arrow !== null) &&
+            archer2Arrows.slice(0, arrowSlots).every((arrow) => arrow !== null),
+        [archer1Arrows, archer2Arrows, arrowSlots]
+    );
+
+    const currentSetPreview = useMemo(() => {
+        if (!allArrowsFilled) return { left: null, right: null };
+        if (isShootOff) {
+            if (archer1Total > archer2Total) return { left: 1, right: 0 };
+            if (archer2Total > archer1Total) return { left: 0, right: 1 };
+            return { left: shootOffWinner === 1 ? 1 : 0, right: shootOffWinner === 2 ? 1 : 0 };
+        }
+        if (archer1Total > archer2Total) return { left: 2, right: 0 };
+        if (archer2Total > archer1Total) return { left: 0, right: 2 };
+        return { left: 1, right: 1 };
+    }, [allArrowsFilled, archer1Total, archer2Total, isShootOff, shootOffWinner]);
+
+    const isShootOffTie = isShootOff && allArrowsFilled && archer1Total === archer2Total;
+
+    const appendLocalSet = (newSet: SetData) => {
+        setSets((prev) => {
+            const remaining = prev.filter((setRow) => setRow.set_number !== newSet.set_number);
+            return [...remaining, newSet].sort((a, b) => a.set_number - b.set_number);
+        });
     };
 
-    const allArrowsFilled = useCallback(() => {
-        return archer1Arrows.every(a => a !== null) && archer2Arrows.every(a => a !== null);
-    }, [archer1Arrows, archer2Arrows]);
+    const advanceWinner = async (completedMatch: MatchData, winnerId: string) => {
+        const nextMatchPosition = Math.ceil(completedMatch.match_position / 2);
+        const nextRound = completedMatch.round_number + 1;
+        const loserId = completedMatch.archer1_id === winnerId ? completedMatch.archer2_id : completedMatch.archer1_id;
 
-    const handleConfirmSet = async () => {
-        if (!match || !allArrowsFilled()) return;
+        const { data: nextMatch } = await supabase
+            .from("elimination_matches")
+            .select("id, archer1_id, archer2_id, target_id")
+            .eq("bracket_id", completedMatch.bracket.id)
+            .eq("round_number", nextRound)
+            .eq("match_position", nextMatchPosition)
+            .single();
+
+        if (nextMatch) {
+            const isOddPosition = completedMatch.match_position % 2 === 1;
+            const updateData: Record<string, string> = isOddPosition ? { archer1_id: winnerId } : { archer2_id: winnerId };
+            const otherArcherId = isOddPosition ? nextMatch.archer2_id : nextMatch.archer1_id;
+            if (otherArcherId && !nextMatch.target_id) updateData.target_id = completedMatch.target_id;
+            await supabase.from("elimination_matches").update(updateData).eq("id", nextMatch.id);
+        }
+
+        const { data: bracket } = await supabase
+            .from("elimination_brackets")
+            .select("bracket_size")
+            .eq("id", completedMatch.bracket.id)
+            .single();
+
+        if (!bracket) return;
+
+        const semifinalRound = Math.log2(bracket.bracket_size) - 1;
+        if (completedMatch.round_number === semifinalRound && loserId) {
+            const { data: bronzeMatch } = await supabase
+                .from("elimination_matches")
+                .select("id")
+                .eq("bracket_id", completedMatch.bracket.id)
+                .eq("round_number", 0)
+                .single();
+
+            if (bronzeMatch) {
+                const bronzeUpdate = completedMatch.match_position === 1 ? { archer1_id: loserId } : { archer2_id: loserId };
+                await supabase.from("elimination_matches").update(bronzeUpdate).eq("id", bronzeMatch.id);
+            }
+        }
+
+        await resolvePendingByeAdvances(supabase, completedMatch.bracket.id, bracket.bracket_size);
+    };
+
+    const handleConfirm = async () => {
+        if (!match || !allArrowsFilled) return;
         setIsSaving(true);
 
-        const archer1Total = calculateTotal(archer1Arrows);
-        const archer2Total = calculateTotal(archer2Arrows);
-
-        // Calculate set points
-        let archer1Points = 0, archer2Points = 0;
-        if (archer1Total > archer2Total) {
-            archer1Points = SET_SYSTEM.POINTS_FOR_SET_WIN;
-            archer2Points = SET_SYSTEM.POINTS_FOR_SET_LOSS;
-        } else if (archer2Total > archer1Total) {
-            archer1Points = SET_SYSTEM.POINTS_FOR_SET_LOSS;
-            archer2Points = SET_SYSTEM.POINTS_FOR_SET_WIN;
-        } else {
-            archer1Points = SET_SYSTEM.POINTS_FOR_SET_TIE;
-            archer2Points = SET_SYSTEM.POINTS_FOR_SET_TIE;
-        }
-
         try {
-            // Insert set (like qualification_scores)
-            const { error: setError } = await supabase
-                .from("sets")
-                .upsert({
-                    match_id: match.id,
-                    set_number: currentSetNumber,
-                    archer1_arrows: archer1Arrows,
-                    archer2_arrows: archer2Arrows,
-                    archer1_set_result: archer1Points,
-                    archer2_set_result: archer2Points,
+            if (isShootOff) {
+                let winnerId: string | null = null;
+                if (archer1Total > archer2Total) winnerId = match.archer1_id;
+                else if (archer2Total > archer1Total) winnerId = match.archer2_id;
+                else if (shootOffWinner === 1) winnerId = match.archer1_id;
+                else if (shootOffWinner === 2) winnerId = match.archer2_id;
+
+                if (!winnerId) {
+                    toast.error("Define el ganador del shoot-off");
+                    setIsSaving(false);
+                    return;
+                }
+
+                const newSet: SetData = {
+                    id: shootOffSet?.id || `shootoff-${match.id}`,
+                    set_number: 99,
+                    archer1_arrows: [archer1Arrows[0] ?? 0],
+                    archer2_arrows: [archer2Arrows[0] ?? 0],
+                    archer1_set_result: winnerId === match.archer1_id ? 1 : 0,
+                    archer2_set_result: winnerId === match.archer2_id ? 1 : 0,
                     is_confirmed: true,
+                    is_shootoff: true,
+                };
+
+                const newArcher1SetPoints = match.archer1_set_points + (winnerId === match.archer1_id ? 1 : 0);
+                const newArcher2SetPoints = match.archer2_set_points + (winnerId === match.archer2_id ? 1 : 0);
+
+                const { error: setError } = await supabase.from("sets").upsert({
+                    match_id: match.id,
+                    set_number: 99,
+                    archer1_arrows: newSet.archer1_arrows,
+                    archer2_arrows: newSet.archer2_arrows,
+                    archer1_set_result: newSet.archer1_set_result,
+                    archer2_set_result: newSet.archer2_set_result,
+                    is_confirmed: true,
+                    is_shootoff: true,
                     confirmed_at: new Date().toISOString(),
                 }, { onConflict: "match_id,set_number" });
 
-            if (setError) throw setError;
+                if (setError) throw setError;
 
-            // Update match points
+                const { error: matchError } = await supabase
+                    .from("elimination_matches")
+                    .update({
+                        status: "completed",
+                        winner_id: winnerId,
+                        archer1_set_points: newArcher1SetPoints,
+                        archer2_set_points: newArcher2SetPoints,
+                    })
+                    .eq("id", match.id);
+
+                if (matchError) throw matchError;
+
+                await advanceWinner(match, winnerId);
+                appendLocalSet(newSet);
+                setMatch({
+                    ...match,
+                    status: "completed",
+                    winner_id: winnerId,
+                    archer1_set_points: newArcher1SetPoints,
+                    archer2_set_points: newArcher2SetPoints,
+                });
+                toast.success("Shoot-off completado");
+                setIsSaving(false);
+                return;
+            }
+
+            let archer1Points = 0;
+            let archer2Points = 0;
+            if (archer1Total > archer2Total) archer1Points = 2;
+            else if (archer2Total > archer1Total) archer2Points = 2;
+            else {
+                archer1Points = 1;
+                archer2Points = 1;
+            }
+
             const newArcher1SetPoints = match.archer1_set_points + archer1Points;
             const newArcher2SetPoints = match.archer2_set_points + archer2Points;
+            const pointsToWin = match.bracket?.tournament?.points_to_win_match || SET_SYSTEM.POINTS_TO_WIN;
 
             let newStatus = "in_progress";
             let winnerId: string | null = null;
-            const pointsToWin = match.bracket?.tournament?.points_to_win_match || SET_SYSTEM.POINTS_TO_WIN;
 
             if (newArcher1SetPoints >= pointsToWin) {
                 newStatus = "completed";
@@ -237,13 +406,35 @@ export default function EliminationSetScorerPage() {
                 newStatus = "completed";
                 winnerId = match.archer2_id;
             } else if (currentSetNumber >= SET_SYSTEM.MAX_SETS) {
-                if (newArcher1SetPoints === newArcher2SetPoints) {
-                    newStatus = "shootoff";
-                } else {
-                    winnerId = newArcher1SetPoints > newArcher2SetPoints ? match.archer1_id : match.archer2_id;
+                if (newArcher1SetPoints === newArcher2SetPoints) newStatus = "shootoff";
+                else {
                     newStatus = "completed";
+                    winnerId = newArcher1SetPoints > newArcher2SetPoints ? match.archer1_id : match.archer2_id;
                 }
             }
+
+            const newSet: SetData = {
+                id: `${match.id}-${currentSetNumber}`,
+                set_number: currentSetNumber,
+                archer1_arrows: archer1Arrows.slice(0, 3).map((arrow) => arrow ?? 0),
+                archer2_arrows: archer2Arrows.slice(0, 3).map((arrow) => arrow ?? 0),
+                archer1_set_result: archer1Points,
+                archer2_set_result: archer2Points,
+                is_confirmed: true,
+            };
+
+            const { error: setError } = await supabase.from("sets").upsert({
+                match_id: match.id,
+                set_number: currentSetNumber,
+                archer1_arrows: newSet.archer1_arrows,
+                archer2_arrows: newSet.archer2_arrows,
+                archer1_set_result: archer1Points,
+                archer2_set_result: archer2Points,
+                is_confirmed: true,
+                confirmed_at: new Date().toISOString(),
+            }, { onConflict: "match_id,set_number" });
+
+            if (setError) throw setError;
 
             const { error: matchUpdateError } = await supabase
                 .from("elimination_matches")
@@ -255,161 +446,66 @@ export default function EliminationSetScorerPage() {
                 })
                 .eq("id", match.id);
 
-            if (matchUpdateError) {
-                console.error("Error updating match:", matchUpdateError);
-                throw new Error("Error actualizando puntos del match: " + matchUpdateError.message);
-            }
+            if (matchUpdateError) throw matchUpdateError;
 
-            console.log("Match updated successfully:", {
-                matchId: match.id,
-                newArcher1SetPoints,
-                newArcher2SetPoints,
-                newStatus
-            });
+            appendLocalSet(newSet);
 
-            // Advance winner if determined
             if (winnerId) {
                 await advanceWinner(match, winnerId);
-                toast.success("¡Partido Finalizado!", {
-                    description: `Ganador: ${winnerId === match.archer1_id ? match.archer1.last_name : match.archer2.last_name}`,
+                setMatch({
+                    ...match,
+                    archer1_set_points: newArcher1SetPoints,
+                    archer2_set_points: newArcher2SetPoints,
+                    status: "completed",
+                    winner_id: winnerId,
                 });
-                router.push(`/scoring/elimination/target/${targetId}`);
-            } else if (newStatus === "shootoff") {
-                // Redirect to shoot-off page
-                toast.info("¡Empate 5-5! Se requiere shoot-off");
-                router.push(`/scoring/elimination/target/${targetId}/shootoff`);
-            } else {
-                toast.success(`Set ${currentSetNumber} confirmado`);
-                // Redirect to Target Hub to see overall score
-                router.push(`/scoring/elimination/target/${targetId}`);
+                toast.success("Duelo finalizado");
+                setIsSaving(false);
+                return;
             }
-        } catch (error: any) {
-            toast.error("Error", { description: error.message });
+
+            if (newStatus === "shootoff") {
+                setMatch({
+                    ...match,
+                    archer1_set_points: newArcher1SetPoints,
+                    archer2_set_points: newArcher2SetPoints,
+                    status: "shootoff",
+                });
+                setCurrentSetNumber(99);
+                setArcher1Arrows([null, null, null]);
+                setArcher2Arrows([null, null, null]);
+                setActiveArcher(1);
+                setActiveCursor(0);
+                setShootOffWinner(null);
+                toast.info("Empate 5-5: registrar shoot-off");
+                setIsSaving(false);
+                return;
+            }
+
+            setMatch({
+                ...match,
+                archer1_set_points: newArcher1SetPoints,
+                archer2_set_points: newArcher2SetPoints,
+                status: "in_progress",
+            });
+            setCurrentSetNumber(currentSetNumber + 1);
+            setArcher1Arrows([null, null, null]);
+            setArcher2Arrows([null, null, null]);
+            setActiveArcher(1);
+            setActiveCursor(0);
+            toast.success(`Set ${currentSetNumber} confirmado`);
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : "Error interno";
+            toast.error("Error", { description: message });
         } finally {
             setIsSaving(false);
         }
     };
 
-    const advanceWinner = async (completedMatch: MatchData, winnerId: string) => {
-        const nextMatchPosition = Math.ceil(completedMatch.match_position / 2);
-        const nextRound = completedMatch.round_number + 1;
-        const loserId = completedMatch.archer1_id === winnerId ? completedMatch.archer2_id : completedMatch.archer1_id;
-
-        console.log("advanceWinner called:", {
-            currentRound: completedMatch.round_number,
-            currentPosition: completedMatch.match_position,
-            nextRound,
-            nextMatchPosition,
-            bracketId: completedMatch.bracket?.id,
-            winnerId,
-        });
-
-        // Advance winner to next round
-        const { data: nextMatch, error: nextMatchError } = await supabase
-            .from("elimination_matches")
-            .select("id, archer1_id, archer2_id, target_id")
-            .eq("bracket_id", completedMatch.bracket.id)
-            .eq("round_number", nextRound)
-            .eq("match_position", nextMatchPosition)
-            .single();
-
-        console.log("Next match query result:", { nextMatch, error: nextMatchError });
-
-        if (nextMatch) {
-            const isOddPosition = completedMatch.match_position % 2 === 1;
-            const updateData: Record<string, string> = isOddPosition
-                ? { archer1_id: winnerId }
-                : { archer2_id: winnerId };
-
-            const otherArcherId = isOddPosition ? nextMatch.archer2_id : nextMatch.archer1_id;
-            if (otherArcherId && !nextMatch.target_id) {
-                updateData.target_id = completedMatch.target_id;
-            }
-
-            console.log("Updating next match:", { nextMatchId: nextMatch.id, updateData });
-
-            const { error: updateError } = await supabase
-                .from("elimination_matches")
-                .update(updateData)
-                .eq("id", nextMatch.id);
-
-            if (updateError) {
-                console.error("Error updating next match:", updateError);
-            } else {
-                console.log("Next match updated successfully");
-            }
-        } else {
-            console.log("No next match found - this might be the final!");
-        }
-
-        // Check if this is a semifinal - if so, place loser in bronze match
-        // Get bracket_size to determine which round is the semifinal
-        const { data: bracket } = await supabase
-            .from("elimination_brackets")
-            .select("bracket_size")
-            .eq("id", completedMatch.bracket.id)
-            .single();
-
-        if (bracket) {
-            const totalRounds = Math.log2(bracket.bracket_size);
-            const semifinalRound = totalRounds - 1; // Semifinal is one round before final
-
-            console.log("Semifinal check:", {
-                currentRound: completedMatch.round_number,
-                semifinalRound,
-                bracketSize: bracket.bracket_size
-            });
-
-            if (completedMatch.round_number === semifinalRound) {
-                // This IS a semifinal! Place loser in bronze match
-                const { data: bronzeMatch } = await supabase
-                    .from("elimination_matches")
-                    .select("id, archer1_id, archer2_id")
-                    .eq("bracket_id", completedMatch.bracket.id)
-                    .eq("round_number", 0) // Bronze match indicator
-                    .single();
-
-                if (bronzeMatch) {
-                    const isFirstSemifinal = completedMatch.match_position === 1;
-                    const bronzeUpdate = isFirstSemifinal
-                        ? { archer1_id: loserId }
-                        : { archer2_id: loserId };
-
-                    await supabase
-                        .from("elimination_matches")
-                        .update(bronzeUpdate)
-                        .eq("id", bronzeMatch.id);
-                    console.log("Loser placed in bronze match:", { loserId, isFirstSemifinal });
-                }
-            }
-        }
-    };
-
     const handleBack = () => router.push(`/scoring/elimination/target/${targetId}`);
 
-    const getScoreColor = (score: number | null): string => {
-        if (score === null) return "bg-slate-200 text-slate-400";
-        if (score === 11 || score === 10 || score === 9) return "bg-yellow-400 text-black";
-        if (score === 8 || score === 7) return "bg-red-500 text-white";
-        if (score === 6 || score === 5) return "bg-blue-500 text-white";
-        if (score === 4 || score === 3) return "bg-gray-800 text-white";
-        if (score === 2 || score === 1) return "bg-white border-2 border-slate-300 text-black";
-        return "bg-green-600 text-white";
-    };
-
-    const displayScore = (score: number | null): string => {
-        if (score === null) return "-";
-        if (score === 11) return "X";
-        if (score === 0) return "M";
-        return String(score);
-    };
-
     if (isLoading) {
-        return (
-            <div className="min-h-screen bg-slate-100 flex items-center justify-center">
-                <Loader2 className="h-10 w-10 animate-spin text-blue-600" />
-            </div>
-        );
+        return <div className="min-h-screen bg-slate-100 flex items-center justify-center"><Loader2 className="h-10 w-10 animate-spin text-blue-700" /></div>;
     }
 
     if (!match) {
@@ -423,134 +519,149 @@ export default function EliminationSetScorerPage() {
         );
     }
 
-    const archer1Total = calculateTotal(archer1Arrows);
-    const archer2Total = calculateTotal(archer2Arrows);
+    const renderArrowGroup = (values: (number | null)[], archer: 1 | 2, interactive: boolean, slots = arrowSlots) => (
+        <div className={`flex ${archer === 1 ? "justify-start" : "justify-end"} gap-1`}>
+            {Array.from({ length: slots }).map((_, index) => (
+                <button
+                    key={`${archer}-${index}`}
+                    type="button"
+                    disabled={!interactive}
+                    onClick={() => interactive && handleCellClick(archer, index)}
+                    className={`flex h-8 w-8 items-center justify-center rounded-md text-sm font-black transition ${getArrowColor(values[index] ?? null, interactive && activeArcher === archer && activeCursor === index)}`}
+                >
+                    {displayScore(values[index] ?? null)}
+                </button>
+            ))}
+        </div>
+    );
 
     return (
-        <div className="min-h-screen bg-slate-100 flex flex-col">
-            {/* Header */}
-            <div className="bg-[#333333] text-white px-3 py-3">
-                <div className="flex items-center justify-between">
-                    <Button variant="ghost" size="icon" onClick={handleBack} className="text-white hover:bg-white/20 h-8 w-8">
-                        <ArrowLeft className="h-4 w-4" />
-                    </Button>
-                    <span className="text-amber-400 font-bold text-lg">SET {currentSetNumber}</span>
-                    <div className="w-8" />
-                </div>
-            </div>
-
-            {/* Set Points Summary */}
-            <div className="bg-white px-4 py-3 flex justify-center gap-8 border-b border-slate-200 shadow-sm">
-                <div className="text-center">
-                    <div className="text-3xl font-black text-blue-600">{match.archer1_set_points}</div>
-                    <div className="text-xs text-slate-500 font-medium">{match.archer1.last_name}</div>
-                </div>
-                <div className="text-slate-300 text-2xl font-bold self-center">-</div>
-                <div className="text-center">
-                    <div className="text-3xl font-black text-red-600">{match.archer2_set_points}</div>
-                    <div className="text-xs text-slate-500 font-medium">{match.archer2.last_name}</div>
-                </div>
-            </div>
-
-            {/* Scoring Area */}
-            <div className="flex-1 p-3 space-y-3">
-                {/* Archer 1 Row */}
-                <Card className={`border-2 ${activeArcher === 1 ? "border-blue-500 bg-blue-50" : "border-slate-200 bg-white"}`}>
-                    <CardContent className="p-3">
-                        <div className="flex items-center justify-between mb-2">
-                            <div className="flex items-center gap-2">
-                                <div className="w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center text-xs font-bold text-white">
-                                    {match.archer1_seed}
-                                </div>
-                                <span className="font-bold text-slate-800 text-sm">{match.archer1.last_name}</span>
-                            </div>
-                            <div className="text-xl font-black text-slate-800">{archer1Total}</div>
-                        </div>
-                        <div className="grid grid-cols-3 gap-2">
-                            {archer1Arrows.map((score, i) => (
-                                <button
-                                    key={i}
-                                    onClick={() => handleCellClick(1, i)}
-                                    className={`h-14 rounded-lg font-bold text-2xl transition-all ${getScoreColor(score)} ${activeArcher === 1 && activeCursor === i ? "ring-2 ring-blue-600 ring-offset-2" : ""}`}
-                                >
-                                    {displayScore(score)}
-                                </button>
-                            ))}
-                        </div>
-                    </CardContent>
-                </Card>
-
-                {/* Archer 2 Row */}
-                <Card className={`border-2 ${activeArcher === 2 ? "border-red-500 bg-red-50" : "border-slate-200 bg-white"}`}>
-                    <CardContent className="p-3">
-                        <div className="flex items-center justify-between mb-2">
-                            <div className="flex items-center gap-2">
-                                <div className="w-7 h-7 rounded-full bg-red-600 flex items-center justify-center text-xs font-bold text-white">
-                                    {match.archer2_seed}
-                                </div>
-                                <span className="font-bold text-slate-800 text-sm">{match.archer2.last_name}</span>
-                            </div>
-                            <div className="text-xl font-black text-slate-800">{archer2Total}</div>
-                        </div>
-                        <div className="grid grid-cols-3 gap-2">
-                            {archer2Arrows.map((score, i) => (
-                                <button
-                                    key={i}
-                                    onClick={() => handleCellClick(2, i)}
-                                    className={`h-14 rounded-lg font-bold text-2xl transition-all ${getScoreColor(score)} ${activeArcher === 2 && activeCursor === i ? "ring-2 ring-red-600 ring-offset-2" : ""}`}
-                                >
-                                    {displayScore(score)}
-                                </button>
-                            ))}
-                        </div>
-                    </CardContent>
-                </Card>
-
-                {/* Set Result Preview */}
-                {allArrowsFilled() && (
-                    <div className="text-center py-2">
-                        <div className="inline-flex items-center gap-4 bg-white rounded-full px-4 py-2 shadow border border-slate-200">
-                            <span className={`font-bold ${archer1Total > archer2Total ? "text-emerald-600" : archer1Total < archer2Total ? "text-slate-400" : "text-amber-500"}`}>
-                                {archer1Total > archer2Total ? "+2" : archer1Total < archer2Total ? "0" : "+1"}
-                            </span>
-                            <span className="text-slate-300">|</span>
-                            <span className={`font-bold ${archer2Total > archer1Total ? "text-emerald-600" : archer2Total < archer1Total ? "text-slate-400" : "text-amber-500"}`}>
-                                {archer2Total > archer1Total ? "+2" : archer2Total < archer1Total ? "0" : "+1"}
-                            </span>
+        <div className="min-h-screen bg-[#eef2f7] flex flex-col">
+            <div className="sticky top-0 z-20 bg-[#0f4170] text-white shadow-lg">
+                <div className="mx-auto max-w-md px-4 py-3">
+                    <div className="flex items-center justify-between text-sm">
+                        <button onClick={handleBack} className="inline-flex items-center gap-2 text-white/90 hover:text-white">
+                            <ArrowLeft className="h-4 w-4" />
+                            Volver al duelo
+                        </button>
+                        <div className="inline-flex items-center gap-1 text-emerald-200">
+                            <Radio className="h-3.5 w-3.5" />
+                            Guardado en linea
                         </div>
                     </div>
-                )}
-            </div>
-
-            {/* Keypad */}
-            <div className="bg-white p-3 border-t border-slate-200">
-                <div className="grid grid-cols-6 gap-2 mb-2">
-                    <button onClick={() => handleKeypadPress(11)} className="h-12 rounded-lg font-bold text-lg bg-yellow-400 text-black">X</button>
-                    <button onClick={() => handleKeypadPress(10)} className="h-12 rounded-lg font-bold text-lg bg-yellow-400 text-black">10</button>
-                    <button onClick={() => handleKeypadPress(9)} className="h-12 rounded-lg font-bold text-lg bg-yellow-400 text-black">9</button>
-                    <button onClick={() => handleKeypadPress(8)} className="h-12 rounded-lg font-bold text-lg bg-red-500 text-white">8</button>
-                    <button onClick={() => handleKeypadPress(7)} className="h-12 rounded-lg font-bold text-lg bg-red-500 text-white">7</button>
-                    <button onClick={() => handleKeypadPress(6)} className="h-12 rounded-lg font-bold text-lg bg-blue-500 text-white">6</button>
-                </div>
-                <div className="grid grid-cols-6 gap-2">
-                    <button onClick={() => handleKeypadPress(5)} className="h-12 rounded-lg font-bold text-lg bg-blue-500 text-white">5</button>
-                    <button onClick={() => handleKeypadPress(4)} className="h-12 rounded-lg font-bold text-lg bg-gray-800 text-white">4</button>
-                    <button onClick={() => handleKeypadPress(3)} className="h-12 rounded-lg font-bold text-lg bg-gray-800 text-white">3</button>
-                    <button onClick={() => handleKeypadPress(2)} className="h-12 rounded-lg font-bold text-lg bg-slate-100 border-2 border-slate-300 text-slate-700">2</button>
-                    <button onClick={() => handleKeypadPress(1)} className="h-12 rounded-lg font-bold text-lg bg-slate-100 border-2 border-slate-300 text-slate-700">1</button>
-                    <button onClick={() => handleKeypadPress(0)} className="h-12 rounded-lg font-bold text-lg bg-green-600 text-white">M</button>
                 </div>
             </div>
 
-            {/* Actions */}
-            <div className="bg-white p-3 flex gap-2 border-t border-slate-200 pb-safe">
-                <Button variant="outline" onClick={handleDelete} className="flex-shrink-0 border-slate-300">
-                    <RotateCcw className="h-4 w-4" />
-                </Button>
-                <Button onClick={handleConfirmSet} disabled={!allArrowsFilled() || isSaving} className="flex-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50">
-                    {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <><Check className="h-4 w-4 mr-2" />CONFIRMAR SET</>}
-                </Button>
+            <div className="flex-1 px-3 py-3">
+                <Card className="border-0 shadow-md">
+                    <CardContent className="p-0">
+                        <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 border-b border-slate-100 bg-white px-4 py-4">
+                            <div className="text-center">
+                                <div className="text-lg font-black text-slate-900">{match.archer1.first_name}</div>
+                                <div className="text-xs font-medium text-slate-500">{match.archer1.last_name}</div>
+                                <div className="mt-1 text-[10px] font-bold uppercase tracking-wide text-slate-400">Seed #{match.archer1_seed || "?"}</div>
+                            </div>
+                            <div className="rounded-2xl bg-slate-50 px-4 py-2 text-center ring-1 ring-slate-200">
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div><div className="text-3xl font-black text-emerald-500">{match.archer1_set_points}</div><div className="text-[10px] font-bold uppercase text-slate-500">Acum.</div></div>
+                                    <div><div className="text-3xl font-black text-[#0f4170]">{match.archer2_set_points}</div><div className="text-[10px] font-bold uppercase text-slate-500">Acum.</div></div>
+                                </div>
+                            </div>
+                            <div className="text-center">
+                                <div className="text-lg font-black text-slate-900">{match.archer2.first_name}</div>
+                                <div className="text-xs font-medium text-slate-500">{match.archer2.last_name}</div>
+                                <div className="mt-1 text-[10px] font-bold uppercase tracking-wide text-slate-400">Seed #{match.archer2_seed || "?"}</div>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-[1fr_auto_auto_auto_1fr] items-center gap-2 bg-slate-100 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                            <div className="text-left">Flechas</div>
+                            <div className="text-center">Pts</div>
+                            <div className="text-center">Set</div>
+                            <div className="text-center">Pts</div>
+                            <div className="text-right">Flechas</div>
+                        </div>
+
+                        <div className="divide-y divide-slate-100">
+                            {confirmedSets.map((setRow) => (
+                                <div key={setRow.id} className="grid grid-cols-[1fr_auto_auto_auto_1fr] items-center gap-2 px-3 py-3">
+                                    {renderArrowGroup(cloneArrows(setRow.archer1_arrows, 3), 1, false, 3)}
+                                    <div className="text-center text-lg font-black text-slate-700">{setRow.archer1_set_result || 0}</div>
+                                    <div className="text-center text-xs font-bold uppercase tracking-wide text-slate-400">Set {setRow.set_number}</div>
+                                    <div className="text-center text-lg font-black text-slate-700">{setRow.archer2_set_result || 0}</div>
+                                    {renderArrowGroup(cloneArrows(setRow.archer2_arrows, 3), 2, false, 3)}
+                                </div>
+                            ))}
+
+                            {shootOffSet?.is_confirmed && (
+                                <div className="grid grid-cols-[1fr_auto_auto_auto_1fr] items-center gap-2 px-3 py-3 bg-amber-50/60">
+                                    {renderArrowGroup(cloneArrows(shootOffSet.archer1_arrows, 1), 1, false, 1)}
+                                    <div className="text-center text-lg font-black text-slate-700">{shootOffSet.archer1_set_result || 0}</div>
+                                    <div className="text-center">
+                                        <div className="text-xs font-bold uppercase tracking-wide text-amber-700">Set {confirmedSets.length + 1}</div>
+                                        <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Shoot-off</div>
+                                    </div>
+                                    <div className="text-center text-lg font-black text-slate-700">{shootOffSet.archer2_set_result || 0}</div>
+                                    {renderArrowGroup(cloneArrows(shootOffSet.archer2_arrows, 1), 2, false, 1)}
+                                </div>
+                            )}
+
+                            {match.status !== "completed" && (
+                                <div className="space-y-3 px-3 py-3 bg-sky-50/60">
+                                    <div className="grid grid-cols-[1fr_auto_auto_auto_1fr] items-center gap-2">
+                                        {renderArrowGroup(archer1Arrows, 1, true, arrowSlots)}
+                                        <div className="text-center text-lg font-black text-slate-800">{currentSetPreview.left ?? "-"}</div>
+                                        <div className="text-center text-xs font-bold uppercase tracking-wide text-sky-700">{isShootOff ? "Shoot-off" : `Set ${currentSetNumber}`}</div>
+                                        <div className="text-center text-lg font-black text-slate-800">{currentSetPreview.right ?? "-"}</div>
+                                        {renderArrowGroup(archer2Arrows, 2, true, arrowSlots)}
+                                    </div>
+
+                                    {isShootOffTie && (
+                                        <div className="rounded-xl bg-white px-3 py-3 ring-1 ring-amber-200">
+                                            <div className="mb-2 text-sm font-bold text-amber-700">Empate en el shoot-off. Marca al ganador del duelo.</div>
+                                            <div className="grid grid-cols-2 gap-2">
+                                                <label className="flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700">
+                                                    <input type="checkbox" checked={shootOffWinner === 1} onChange={() => setShootOffWinner(shootOffWinner === 1 ? null : 1)} />
+                                                    {match.archer1.first_name} {match.archer1.last_name}
+                                                </label>
+                                                <label className="flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700">
+                                                    <input type="checkbox" checked={shootOffWinner === 2} onChange={() => setShootOffWinner(shootOffWinner === 2 ? null : 2)} />
+                                                    {match.archer2.first_name} {match.archer2.last_name}
+                                                </label>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    </CardContent>
+                </Card>
             </div>
+
+            {match.status !== "completed" && (
+                <div className="bg-white border-t border-slate-200">
+                    <div className="p-2 pb-safe">
+                        <div className="grid grid-cols-3 gap-2 max-w-md mx-auto">
+                            {KEYPAD_LAYOUT.flat().map((key) => (
+                                <button key={key} onClick={() => handleKeypadPress(key === "X" ? 11 : key === "M" ? 0 : parseInt(key, 10))} className={`h-14 rounded-lg text-2xl font-bold shadow-sm active:scale-95 transition-transform border-b-4 ${KEYPAD_COLORS[key]}`}>
+                                    {key}
+                                </button>
+                            ))}
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 max-w-md mx-auto mt-3">
+                            <Button onClick={handleDelete} variant="outline" className="h-12 border-slate-300 text-slate-600 hover:bg-slate-100">
+                                <Eraser className="w-5 h-5 mr-2" />
+                                Borrar Flecha
+                            </Button>
+                            <Button onClick={handleConfirm} disabled={!allArrowsFilled || (isShootOffTie && shootOffWinner === null) || isSaving} className="h-12 text-lg font-bold bg-green-600 hover:bg-green-700 shadow-md shadow-green-900/20 disabled:opacity-50">
+                                {isSaving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Check className="mr-2 h-5 w-5" />}
+                                {isShootOff ? "Confirmar Shoot-off" : "Confirmar Set"}
+                            </Button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

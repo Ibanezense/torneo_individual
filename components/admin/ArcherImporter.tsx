@@ -1,6 +1,9 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import Papa from "papaparse";
+import { Upload, FileSpreadsheet, Check, Loader2, Download } from "lucide-react";
+import { toast } from "sonner";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -14,12 +17,14 @@ import {
     TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { Upload, FileSpreadsheet, Check, X, Loader2, Download } from "lucide-react";
-import { toast } from "sonner";
-import Papa from "papaparse";
-import * as XLSX from "xlsx";
-import type { AgeCategory, Gender } from "@/types/database";
-import { CATEGORY_LABELS, GENDER_LABELS } from "@/lib/constants/categories";
+import {
+    AGE_CATEGORY_OPTIONS,
+    CATEGORY_LABELS,
+    DIVISION_LABELS,
+    GENDER_LABELS,
+    TOURNAMENT_DIVISION_OPTIONS,
+} from "@/lib/constants/categories";
+import type { AgeCategory, Gender, TournamentDivision } from "@/types/database";
 
 interface ImportedArcher {
     first_name: string;
@@ -27,6 +32,7 @@ interface ImportedArcher {
     club?: string;
     age_category: AgeCategory;
     gender: Gender;
+    division: TournamentDivision;
     distance: number;
     isValid: boolean;
     errors: string[];
@@ -35,73 +41,201 @@ interface ImportedArcher {
 interface ArcherImporterProps {
     tournamentId: string;
     availableDistances?: number[];
+    allowedCategories?: AgeCategory[];
+    allowedDivisions?: TournamentDivision[];
     onSuccess?: () => void;
 }
 
-const VALID_CATEGORIES: AgeCategory[] = ["u10", "u13", "u15", "u18", "u21", "senior", "master", "open"];
+const VALID_CATEGORIES = AGE_CATEGORY_OPTIONS;
+const VALID_DIVISIONS = TOURNAMENT_DIVISION_OPTIONS;
+const MAX_IMPORT_FILE_SIZE_BYTES = 5 * 1024 * 1024;
+const MAX_IMPORT_ROWS = 1000;
+const DISALLOWED_IMPORT_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
-export function ArcherImporter({ tournamentId, availableDistances = [], onSuccess }: ArcherImporterProps) {
+interface ArcherWritePayload {
+    first_name: string;
+    last_name: string;
+    club: string | null;
+    age_category: AgeCategory;
+    gender: Gender;
+    division: TournamentDivision;
+    distance: number;
+}
+
+interface ExistingArcherRow extends ArcherWritePayload {
+    id: string;
+}
+
+function normalizeLookupKey(value: string): string {
+    return value
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .trim()
+        .toLowerCase();
+}
+
+function getRowValue(row: Record<string, unknown>, keys: string[]): string {
+    const normalizedKeys = new Set(keys.map(normalizeLookupKey));
+
+    for (const [key, value] of Object.entries(row)) {
+        if (normalizedKeys.has(normalizeLookupKey(key)) && value !== undefined && value !== null) {
+            return String(value).trim();
+        }
+    }
+
+    return "";
+}
+
+function sanitizeImportRow(row: Record<string, unknown>): Record<string, unknown> {
+    const safeRow = Object.create(null) as Record<string, unknown>;
+
+    for (const [key, value] of Object.entries(row)) {
+        if (DISALLOWED_IMPORT_KEYS.has(normalizeLookupKey(key))) continue;
+        safeRow[key] = value;
+    }
+
+    return safeRow;
+}
+
+function normalizeCategory(raw: string): AgeCategory | null {
+    const value = normalizeLookupKey(raw);
+    const compactValue = value.replace(/\s+/g, "");
+    if (!value) return null;
+
+    if (VALID_CATEGORIES.includes(value as AgeCategory)) return value as AgeCategory;
+    if (compactValue.includes("sub10") || compactValue.includes("u10") || value === "10") return "u10";
+    if (compactValue.includes("sub13") || compactValue.includes("u13") || value === "13") return "u13";
+    if (compactValue.includes("sub15") || compactValue.includes("u15") || value === "15") return "u15";
+    if (compactValue.includes("sub18") || compactValue.includes("u18") || value.includes("cadete") || value === "18") return "u18";
+    if (compactValue.includes("sub21") || compactValue.includes("u21") || value.includes("junior") || value === "21") return "u21";
+    if (value.includes("mayor")) return "senior";
+    if (value === "senior" || value.includes("master") || value.includes("veteran")) return "master";
+    if (value.includes("open") || value.includes("abierto")) return "open";
+
+    return null;
+}
+
+function normalizeGender(raw: string): Gender | null {
+    const value = normalizeLookupKey(raw);
+    if (!value) return null;
+
+    if (["male", "m", "masculino", "hombre", "varon", "varones"].includes(value)) return "male";
+    if (["female", "f", "femenino", "mujer", "dama", "damas"].includes(value)) return "female";
+    return null;
+}
+
+function normalizeDivision(raw: string): TournamentDivision | null {
+    const value = normalizeLookupKey(raw);
+    if (!value) return null;
+
+    if (VALID_DIVISIONS.includes(value as TournamentDivision)) return value as TournamentDivision;
+    if (value.includes("recurv") || value.includes("recuv") || value.includes("olympic")) return "recurvo";
+    if (value.includes("compuest") || value.includes("compound")) return "compuesto";
+    if (value.includes("barebow") || value.includes("instintiv") || value.includes("desnudo")) return "barebow";
+
+    return null;
+}
+
+function normalizeText(value?: string | null): string {
+    return (value || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function buildArcherKey(archer: ArcherWritePayload): string {
+    return [
+        normalizeText(archer.first_name),
+        normalizeText(archer.last_name),
+        normalizeText(archer.club),
+        archer.age_category,
+        archer.gender,
+        archer.division,
+        String(archer.distance),
+    ].join("|");
+}
+
+export function ArcherImporter({
+    availableDistances = [],
+    allowedCategories = [],
+    allowedDivisions = [],
+    onSuccess,
+}: ArcherImporterProps) {
     const supabase = createClient();
     const [importedArchers, setImportedArchers] = useState<ImportedArcher[]>([]);
     const [isProcessing, setIsProcessing] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
 
-    const validateArcher = (row: Record<string, string>): ImportedArcher => {
+    const validateArcher = useCallback((row: Record<string, unknown>): ImportedArcher => {
         const errors: string[] = [];
 
-        const first_name = row.nombre || row.first_name || row.Nombre || "";
-        const last_name = row.apellido || row.last_name || row.Apellido || "";
-        const club = row.club || row.Club || "";
-        const categoryRaw = (row.categoria || row.age_category || row.Categoria || "").toLowerCase();
-        const genderRaw = (row.genero || row.gender || row.Genero || row.sexo || row.Sexo || "").toLowerCase();
-        const distanceRaw = row.distancia || row.distance || row.Distancia || "";
+        const first_name = getRowValue(row, ["nombre", "Nombre", "NOMBRE", "first_name", "First Name"]);
+        const last_name = getRowValue(row, ["apellido", "Apellido", "APELLIDO", "last_name", "Last Name"]);
+        const club = getRowValue(row, ["club", "Club", "CLUB"]);
+
+        const categoryRaw = getRowValue(row, [
+            "categoria",
+            "Categoria",
+            "CATEGORIA",
+            "age_category",
+            "category",
+        ]);
+        const genderRaw = getRowValue(row, [
+            "genero",
+            "Genero",
+            "GENERO",
+            "sexo",
+            "Sexo",
+            "SEXO",
+            "gender",
+        ]);
+        const divisionRaw = getRowValue(row, [
+            "division",
+            "Division",
+            "DIVISION",
+            "modalidad",
+            "Modalidad",
+            "MODALIDAD",
+            "arco",
+            "Arco",
+            "ARCO",
+        ]);
+        const distanceRaw = getRowValue(row, [
+            "distancia",
+            "Distancia",
+            "DISTANCIA",
+            "distance",
+        ]);
 
         if (!first_name) errors.push("Nombre requerido");
         if (!last_name) errors.push("Apellido requerido");
 
-        // Normalize category
-        let age_category: AgeCategory = "open";
-        if (VALID_CATEGORIES.includes(categoryRaw as AgeCategory)) {
-            age_category = categoryRaw as AgeCategory;
-        } else if (categoryRaw.includes("10") || categoryRaw.includes("sub10")) {
-            age_category = "u10";
-        } else if (categoryRaw.includes("13") || categoryRaw.includes("sub13")) {
-            age_category = "u13";
-        } else if (categoryRaw.includes("15") || categoryRaw.includes("sub15")) {
-            age_category = "u15";
-        } else if (categoryRaw.includes("18") || categoryRaw.includes("cadete")) {
-            age_category = "u18";
-        } else if (categoryRaw.includes("21") || categoryRaw.includes("junior")) {
-            age_category = "u21";
-        } else if (categoryRaw.includes("mayor")) {
-            age_category = "senior";
-        } else if (categoryRaw === "senior") {
-            age_category = "master";
-        } else if (categoryRaw) {
-            errors.push(`Categoría no válida: ${categoryRaw}`);
+        const age_category = normalizeCategory(categoryRaw);
+        if (!age_category) {
+            errors.push(`Categoria no valida: ${categoryRaw || "(vacia)"}`);
+        } else if (allowedCategories.length > 0 && !allowedCategories.includes(age_category)) {
+            errors.push(`Categoria ${CATEGORY_LABELS[age_category]} no habilitada en este torneo`);
         }
 
-        // Normalize gender
-        let gender: Gender = "male";
-        if (genderRaw === "male" || genderRaw === "m" || genderRaw === "masculino" || genderRaw === "hombre") {
-            gender = "male";
-        } else if (genderRaw === "female" || genderRaw === "f" || genderRaw === "femenino" || genderRaw === "mujer") {
-            gender = "female";
-        } else if (genderRaw) {
-            errors.push(`Género no válido: ${genderRaw}`);
+        const gender = normalizeGender(genderRaw);
+        if (!gender) {
+            errors.push(`Genero no valido: ${genderRaw || "(vacio)"}`);
         }
 
-        // Parse distance
+        const division = normalizeDivision(divisionRaw);
+        if (!division) {
+            errors.push(`Division no valida: ${divisionRaw || "(vacia)"}`);
+        } else if (allowedDivisions.length > 0 && !allowedDivisions.includes(division)) {
+            errors.push(`Division ${DIVISION_LABELS[division]} no habilitada en este torneo`);
+        }
+
         let distance = 0;
         if (distanceRaw) {
-            const distNum = parseInt(distanceRaw.replace(/m/i, "").trim());
+            const distNum = parseInt(distanceRaw.replace(/m/i, "").trim(), 10);
             if (!isNaN(distNum) && distNum > 0) {
                 distance = distNum;
                 if (availableDistances.length > 0 && !availableDistances.includes(distNum)) {
                     errors.push(`Distancia ${distNum}m no disponible en este torneo`);
                 }
             } else {
-                errors.push(`Distancia no válida: ${distanceRaw}`);
+                errors.push(`Distancia no valida: ${distanceRaw}`);
             }
         } else {
             errors.push("Distancia requerida");
@@ -111,56 +245,61 @@ export function ArcherImporter({ tournamentId, availableDistances = [], onSucces
             first_name,
             last_name,
             club: club || undefined,
-            age_category,
-            gender,
+            age_category: age_category || "open",
+            gender: gender || "male",
+            division: division || "recurvo",
             distance,
             isValid: errors.length === 0,
             errors,
         };
-    };
+    }, [availableDistances, allowedCategories, allowedDivisions]);
 
-    const processFile = useCallback((file: File) => {
-        setIsProcessing(true);
-        const fileExtension = file.name.split(".").pop()?.toLowerCase();
+    const processFile = useCallback(
+        (file: File) => {
+            setIsProcessing(true);
+            const fileExtension = file.name.split(".").pop()?.toLowerCase();
 
-        if (fileExtension === "csv") {
-            Papa.parse(file, {
-                header: true,
-                skipEmptyLines: true,
-                complete: (results) => {
-                    const archers = results.data.map((row) => validateArcher(row as Record<string, string>));
-                    setImportedArchers(archers);
-                    setIsProcessing(false);
-                },
-                error: (error) => {
-                    toast.error("Error al procesar CSV", { description: error.message });
-                    setIsProcessing(false);
-                },
-            });
-        } else if (fileExtension === "xlsx" || fileExtension === "xls") {
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                try {
-                    const data = new Uint8Array(e.target?.result as ArrayBuffer);
-                    const workbook = XLSX.read(data, { type: "array" });
-                    const sheetName = workbook.SheetNames[0];
-                    const worksheet = workbook.Sheets[sheetName];
-                    const json = XLSX.utils.sheet_to_json(worksheet) as Record<string, string>[];
+            if (file.size > MAX_IMPORT_FILE_SIZE_BYTES) {
+                toast.error("Archivo demasiado grande", {
+                    description: "El archivo no debe superar 5 MB.",
+                });
+                setIsProcessing(false);
+                return;
+            }
 
-                    const archers = json.map((row) => validateArcher(row));
-                    setImportedArchers(archers);
-                    setIsProcessing(false);
-                } catch {
-                    toast.error("Error al procesar Excel");
-                    setIsProcessing(false);
-                }
-            };
-            reader.readAsArrayBuffer(file);
-        } else {
-            toast.error("Formato no soportado", { description: "Usa archivos CSV o Excel (.xlsx)" });
+            if (fileExtension === "csv") {
+                Papa.parse(file, {
+                    header: true,
+                    skipEmptyLines: true,
+                    complete: (results) => {
+                        const parsedRows = Array.isArray(results.data)
+                            ? results.data
+                            : [];
+                        const limitedRows = parsedRows.slice(0, MAX_IMPORT_ROWS);
+                        if (parsedRows.length > MAX_IMPORT_ROWS) {
+                            toast.warning("Archivo truncado", {
+                                description: `Solo se procesaran las primeras ${MAX_IMPORT_ROWS} filas.`,
+                            });
+                        }
+                        const archers = limitedRows
+                            .map((row) => sanitizeImportRow(row as Record<string, unknown>))
+                            .map((row) => validateArcher(row));
+                        setImportedArchers(archers);
+                        setIsProcessing(false);
+                    },
+                    error: (error) => {
+                        toast.error("Error al procesar CSV", { description: error.message });
+                        setIsProcessing(false);
+                    },
+                });
+                return;
+            }
+
+            toast.error("Formato no soportado", { description: "Usa archivos CSV (.csv)." });
             setIsProcessing(false);
-        }
-    }, [availableDistances]);
+        },
+        [validateArcher]
+    );
 
     const handleDrop = useCallback(
         (e: React.DragEvent<HTMLDivElement>) => {
@@ -177,30 +316,85 @@ export function ArcherImporter({ tournamentId, availableDistances = [], onSucces
     };
 
     const handleSave = async () => {
-        const validArchers = importedArchers.filter((a) => a.isValid);
+        const validArchers = importedArchers.filter((archer) => archer.isValid);
         if (validArchers.length === 0) {
-            toast.error("No hay arqueros válidos para guardar");
+            toast.error("No hay arqueros validos para guardar");
             return;
         }
 
         setIsSaving(true);
 
         try {
-            const archersToInsert = validArchers.map(({ isValid, errors, ...archer }) => ({
-                ...archer,
-                division: "recurvo",
+            const normalizedImport: ArcherWritePayload[] = validArchers.map((archer) => ({
+                first_name: archer.first_name,
+                last_name: archer.last_name,
+                club: archer.club || null,
+                age_category: archer.age_category,
+                gender: archer.gender,
+                division: archer.division,
+                distance: archer.distance,
             }));
 
-            const { data: insertedArchers, error: archersError } = await supabase
+            const uniqueByKey = new Map<string, ArcherWritePayload>();
+            for (const archer of normalizedImport) {
+                uniqueByKey.set(buildArcherKey(archer), archer);
+            }
+
+            const uniqueImportArchers = Array.from(uniqueByKey.values());
+
+            const { data: existingArchers, error: existingError } = await supabase
                 .from("archers")
-                .insert(archersToInsert)
-                .select();
+                .select("id, first_name, last_name, club, age_category, gender, division, distance");
 
-            if (archersError) throw archersError;
+            if (existingError) throw existingError;
 
-            toast.success(`${insertedArchers.length} arqueros importados correctamente`);
+            const existingByKey = new Map<string, ExistingArcherRow>();
+            for (const existing of (existingArchers || []) as ExistingArcherRow[]) {
+                const key = buildArcherKey(existing);
+                if (!existingByKey.has(key)) {
+                    existingByKey.set(key, existing);
+                }
+            }
+
+            const toInsert: ArcherWritePayload[] = [];
+            const toUpdate: (ArcherWritePayload & { id: string })[] = [];
+
+            for (const archer of uniqueImportArchers) {
+                const key = buildArcherKey(archer);
+                const existing = existingByKey.get(key);
+                if (existing) {
+                    toUpdate.push({ id: existing.id, ...archer });
+                } else {
+                    toInsert.push(archer);
+                }
+            }
+
+            if (toUpdate.length > 0) {
+                const { error: updateError } = await supabase
+                    .from("archers")
+                    .upsert(toUpdate, { onConflict: "id" });
+                if (updateError) throw updateError;
+            }
+
+            if (toInsert.length > 0) {
+                const { error: insertError } = await supabase
+                    .from("archers")
+                    .insert(toInsert);
+                if (insertError) throw insertError;
+            }
+
+            const duplicatedRowsInFile = normalizedImport.length - uniqueImportArchers.length;
+            const summaryParts = [
+                `${toInsert.length} nuevos`,
+                `${toUpdate.length} actualizados`,
+            ];
+            if (duplicatedRowsInFile > 0) {
+                summaryParts.push(`${duplicatedRowsInFile} duplicados internos ignorados`);
+            }
+
+            toast.success(`Importacion completada: ${summaryParts.join(", ")}`);
             setImportedArchers([]);
-            if (onSuccess) onSuccess();
+            onSuccess?.();
         } catch (error: unknown) {
             const errMsg = error instanceof Error ? error.message : "Error desconocido";
             toast.error("Error al guardar arqueros", { description: errMsg });
@@ -211,33 +405,78 @@ export function ArcherImporter({ tournamentId, availableDistances = [], onSucces
 
     const downloadTemplate = () => {
         const distanceExample = availableDistances.length > 0 ? availableDistances[0] : 20;
-        const template = [
-            ["Nombre", "Apellido", "Club", "Categoria", "Genero", "Distancia"],
-            ["Juan", "Pérez", "Club A", "senior", "male", distanceExample],
-            ["María", "García", "Club B", "u18", "female", distanceExample],
+        const templateRows = [
+            {
+                Nombre: "Juan",
+                Apellido: "Perez",
+                Club: "Club A",
+                Categoria: "Mayores",
+                Genero: "Varones",
+                Division: "Recurvo",
+                Distancia: String(distanceExample),
+            },
+            {
+                Nombre: "Maria",
+                Apellido: "Garcia",
+                Club: "Club B",
+                Categoria: "U18",
+                Genero: "Damas",
+                Division: "Compuesto",
+                Distancia: String(distanceExample),
+            },
         ];
-        const ws = XLSX.utils.aoa_to_sheet(template);
-        const wb = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(wb, ws, "Arqueros");
-        XLSX.writeFile(wb, "plantilla_arqueros.xlsx");
+
+        const csvContent = Papa.unparse(templateRows);
+        const blob = new Blob([`\uFEFF${csvContent}`], {
+            type: "text/csv;charset=utf-8;",
+        });
+
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "plantilla_arqueros.csv";
+        link.click();
+        URL.revokeObjectURL(url);
     };
 
-    const validCount = importedArchers.filter((a) => a.isValid).length;
-    const invalidCount = importedArchers.filter((a) => !a.isValid).length;
+    const validCount = importedArchers.filter((archer) => archer.isValid).length;
+    const invalidCount = importedArchers.filter((archer) => !archer.isValid).length;
 
     return (
         <div className="space-y-6">
-            {/* Available distances info */}
             {availableDistances.length > 0 && (
                 <div className="flex items-center gap-2 flex-wrap text-sm">
                     <span className="font-medium text-slate-600">Distancias disponibles:</span>
-                    {availableDistances.map((d) => (
-                        <Badge key={d} variant="secondary" className="bg-blue-100 text-blue-700">{d}m</Badge>
+                    {availableDistances.map((distance) => (
+                        <Badge key={distance} variant="secondary" className="bg-blue-100 text-blue-700">
+                            {distance}m
+                        </Badge>
                     ))}
                 </div>
             )}
 
-            {/* Upload Area */}
+            {allowedDivisions.length > 0 && (
+                <div className="flex items-center gap-2 flex-wrap text-sm">
+                    <span className="font-medium text-slate-600">Divisiones habilitadas:</span>
+                    {allowedDivisions.map((division) => (
+                        <Badge key={division} variant="secondary" className="bg-slate-100 text-slate-700">
+                            {DIVISION_LABELS[division]}
+                        </Badge>
+                    ))}
+                </div>
+            )}
+
+            {allowedCategories.length > 0 && (
+                <div className="flex items-center gap-2 flex-wrap text-sm">
+                    <span className="font-medium text-slate-600">Categorias habilitadas:</span>
+                    {allowedCategories.map((category) => (
+                        <Badge key={category} variant="secondary" className="bg-slate-100 text-slate-700">
+                            {CATEGORY_LABELS[category]}
+                        </Badge>
+                    ))}
+                </div>
+            )}
+
             <Card className="border-0 shadow-none">
                 <CardContent className="space-y-4 p-0">
                     <div
@@ -252,17 +491,13 @@ export function ArcherImporter({ tournamentId, availableDistances = [], onSucces
                                 <div className="bg-white p-4 rounded-full shadow-sm mb-4 group-hover:scale-110 transition-transform">
                                     <Upload className="h-8 w-8 text-blue-600" />
                                 </div>
-                                <p className="mb-1 text-lg font-bold text-slate-700">
-                                    Arrastra tu archivo aquí
-                                </p>
-                                <p className="text-sm text-slate-500 font-medium">
-                                    Soporta Excel (.xlsx) o CSV
-                                </p>
+                                <p className="mb-1 text-lg font-bold text-slate-700">Arrastra tu archivo aqui</p>
+                                <p className="text-sm text-slate-500 font-medium">Soporta CSV (.csv)</p>
                             </>
                         )}
                         <Input
                             type="file"
-                            accept=".csv,.xlsx,.xls"
+                            accept=".csv"
                             onChange={handleFileChange}
                             className="absolute inset-0 cursor-pointer opacity-0"
                             disabled={isProcessing}
@@ -272,46 +507,70 @@ export function ArcherImporter({ tournamentId, availableDistances = [], onSucces
                     <div className="flex justify-between items-center bg-blue-50/50 p-4 rounded-lg border border-blue-100">
                         <div className="flex items-center gap-2 text-sm text-blue-800">
                             <FileSpreadsheet className="h-4 w-4" />
-                            <span className="font-semibold">¿Necesitas ayuda?</span>
+                            <span className="font-semibold">Necesitas ayuda?</span>
                             <span className="text-blue-600">Descarga la plantilla oficial para evitar errores.</span>
                         </div>
-                        <Button variant="outline" size="sm" onClick={downloadTemplate} className="bg-white border-blue-200 text-blue-700 hover:bg-blue-50 hover:text-blue-800">
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={downloadTemplate}
+                            className="bg-white border-blue-200 text-blue-700 hover:bg-blue-50 hover:text-blue-800"
+                        >
                             <Download className="mr-2 h-4 w-4" />
-                            Plantilla Excel
+                            Plantilla CSV
                         </Button>
                     </div>
                 </CardContent>
             </Card>
 
-            {/* Preview Section */}
             {importedArchers.length > 0 && (
                 <div className="border rounded-xl overflow-hidden shadow-sm bg-white">
                     <div className="bg-slate-50 px-6 py-4 border-b flex items-center justify-between">
                         <div className="flex items-center gap-4">
-                            <h4 className="font-bold text-slate-800">Validación de Datos</h4>
+                            <h4 className="font-bold text-slate-800">Validacion de Datos</h4>
                             <div className="flex gap-2 text-sm font-medium">
-                                <span className="px-2 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-200">{validCount} Válidos</span>
-                                {invalidCount > 0 && <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-200">{invalidCount} Errores</span>}
+                                <span className="px-2 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-200">
+                                    {validCount} Validos
+                                </span>
+                                {invalidCount > 0 && (
+                                    <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-200">
+                                        {invalidCount} Errores
+                                    </span>
+                                )}
                             </div>
                         </div>
                         <div className="flex gap-2">
-                            <Button variant="ghost" size="sm" onClick={() => setImportedArchers([])} className="text-slate-500 hover:text-slate-700">
+                            <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => setImportedArchers([])}
+                                className="text-slate-500 hover:text-slate-700"
+                            >
                                 Cancelar
                             </Button>
-                            <Button onClick={handleSave} disabled={isSaving || validCount === 0} className="bg-blue-600 hover:bg-blue-700 text-white font-bold shadow-md shadow-blue-900/10">
-                                {isSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Check className="mr-2 h-4 w-4" />}
+                            <Button
+                                onClick={handleSave}
+                                disabled={isSaving || validCount === 0}
+                                className="bg-blue-600 hover:bg-blue-700 text-white font-bold shadow-md shadow-blue-900/10"
+                            >
+                                {isSaving ? (
+                                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                ) : (
+                                    <Check className="mr-2 h-4 w-4" />
+                                )}
                                 Importar {validCount} Arqueros
                             </Button>
                         </div>
                     </div>
-                    <div className="max-h-[400px] overflow-auto">
+                    <div className="max-h-[420px] overflow-auto">
                         <Table>
                             <TableHeader className="bg-white sticky top-0 shadow-sm z-10">
                                 <TableRow>
                                     <TableHead className="w-10 text-center">#</TableHead>
                                     <TableHead className="font-bold text-slate-700">Nombre</TableHead>
                                     <TableHead className="font-bold text-slate-700">Club</TableHead>
-                                    <TableHead className="font-bold text-slate-700">Categoría</TableHead>
+                                    <TableHead className="font-bold text-slate-700">Categoria</TableHead>
+                                    <TableHead className="font-bold text-slate-700">Division</TableHead>
                                     <TableHead className="font-bold text-slate-700">Distancia</TableHead>
                                     <TableHead className="font-bold text-slate-700">Estado</TableHead>
                                 </TableRow>
@@ -319,24 +578,43 @@ export function ArcherImporter({ tournamentId, availableDistances = [], onSucces
                             <TableBody>
                                 {importedArchers.map((archer, index) => (
                                     <TableRow key={index} className={!archer.isValid ? "bg-red-50/50" : ""}>
-                                        <TableCell className="text-center text-slate-400 font-mono text-xs">{index + 1}</TableCell>
+                                        <TableCell className="text-center text-slate-400 font-mono text-xs">
+                                            {index + 1}
+                                        </TableCell>
                                         <TableCell>
-                                            <div className="font-bold text-slate-700">{archer.last_name}, {archer.first_name}</div>
-                                            <div className="text-xs text-slate-400">{GENDER_LABELS[archer.gender]}</div>
+                                            <div className="font-bold text-slate-700">
+                                                {archer.last_name}, {archer.first_name}
+                                            </div>
+                                            <div className="text-xs text-slate-400">
+                                                {GENDER_LABELS[archer.gender]}
+                                            </div>
                                         </TableCell>
                                         <TableCell>{archer.club || "-"}</TableCell>
                                         <TableCell>
-                                            <Badge variant="outline" className="bg-slate-100">{CATEGORY_LABELS[archer.age_category]}</Badge>
+                                            <Badge variant="outline" className="bg-slate-100">
+                                                {CATEGORY_LABELS[archer.age_category]}
+                                            </Badge>
                                         </TableCell>
                                         <TableCell>
-                                            <span className="font-mono font-bold text-slate-600">{archer.distance}m</span>
+                                            <Badge variant="outline" className="bg-slate-100">
+                                                {DIVISION_LABELS[archer.division]}
+                                            </Badge>
+                                        </TableCell>
+                                        <TableCell>
+                                            <span className="font-mono font-bold text-slate-600">
+                                                {archer.distance}m
+                                            </span>
                                         </TableCell>
                                         <TableCell>
                                             {archer.isValid ? (
-                                                <div className="flex items-center text-green-600 text-sm font-bold"><Check className="w-4 h-4 mr-1" /> Listo</div>
+                                                <div className="flex items-center text-green-600 text-sm font-bold">
+                                                    <Check className="w-4 h-4 mr-1" /> Listo
+                                                </div>
                                             ) : (
                                                 <div className="text-red-600 text-xs font-medium">
-                                                    {archer.errors.map((e, i) => <div key={i}>• {e}</div>)}
+                                                    {archer.errors.map((error, i) => (
+                                                        <div key={i}>- {error}</div>
+                                                    ))}
                                                 </div>
                                             )}
                                         </TableCell>

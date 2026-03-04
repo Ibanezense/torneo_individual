@@ -9,6 +9,25 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Target, Loader2, ArrowRight } from "lucide-react";
 import { toast } from "sonner";
 
+interface TargetSearchRow {
+    id: string;
+    target_number: number;
+    tournament: {
+        id: string;
+        name: string;
+        status: string;
+    } | {
+        id: string;
+        name: string;
+        status: string;
+    }[] | null;
+}
+
+function getTournamentStatus(row: TargetSearchRow): string | null {
+    const tournament = Array.isArray(row.tournament) ? row.tournament[0] : row.tournament;
+    return tournament?.status || null;
+}
+
 export default function AccessPage() {
     const router = useRouter();
     const supabase = createClient();
@@ -49,8 +68,8 @@ export default function AccessPage() {
                 if (error) throw error;
 
                 // Filter to only include targets from active tournaments
-                const activeTargets = (targets || []).filter((t: any) => {
-                    const status = t.tournament?.status;
+                const activeTargets = ((targets || []) as TargetSearchRow[]).filter((target) => {
+                    const status = getTournamentStatus(target);
                     return status === "qualification" || status === "elimination";
                 });
 
@@ -67,7 +86,7 @@ export default function AccessPage() {
 
                 if (activeTargets.length === 1) {
                     const targetId = activeTargets[0].id;
-                    const tournamentStatus = (activeTargets[0] as any).tournament?.status;
+                    const tournamentStatus = getTournamentStatus(activeTargets[0]);
 
                     // Route based on tournament phase
                     if (tournamentStatus === "elimination") {
@@ -111,10 +130,11 @@ export default function AccessPage() {
                 });
             }
 
-        } catch (error: any) {
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : "Error interno";
             console.error("Error searching:", error);
             toast.error("Error al buscar", {
-                description: error.message,
+                description: message,
             });
         } finally {
             setIsLoading(false);

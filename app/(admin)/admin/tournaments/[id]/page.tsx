@@ -2,16 +2,14 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
     ArrowLeft,
     Users,
     Target,
     FileSpreadsheet,
     QrCode,
-    Play,
     Settings,
     BarChart3,
     Swords,
@@ -88,7 +86,7 @@ export default async function TournamentDetailPage({ params }: PageProps) {
         },
         {
             title: "Control Room",
-            description: "Vista en vivo del campo",
+            description: "Vista en vivo y captura de puntajes por paca",
             icon: FileSpreadsheet,
             href: `/admin/tournaments/${id}/control`,
             highlight: tournament.status === "qualification",

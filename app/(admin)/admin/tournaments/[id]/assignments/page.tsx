@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useState, useEffect, useCallback } from "react";
+import { useParams } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -10,7 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { ArrowLeft, Wand2, Loader2, Save, GripVertical, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { FullPageLoader } from "@/components/shared/LoadingSpinner";
-import { CATEGORY_LABELS } from "@/lib/constants/categories";
+import { CATEGORY_LABELS, DIVISION_LABELS } from "@/lib/constants/categories";
 import type { Archer, Target, AgeCategory, TargetPosition, ShootingTurn } from "@/types/database";
 
 interface TargetAssignment {
@@ -25,9 +25,26 @@ interface TargetWithAssignments {
     assignments: TargetAssignment[];
 }
 
+interface AssignmentRow {
+    target_id: string;
+    archer_id: string;
+    archer: Archer;
+    position: TargetPosition;
+    turn: ShootingTurn;
+}
+
+function buildAssignmentAccessCode(
+    _tournamentId: string,
+    targetNumber: number,
+    _position: TargetPosition
+): string {
+    void _tournamentId;
+    void _position;
+    return `T${targetNumber}`;
+}
+
 export default function AssignmentsPage() {
     const params = useParams();
-    const router = useRouter();
     const tournamentId = params.id as string;
     const supabase = createClient();
 
@@ -40,11 +57,7 @@ export default function AssignmentsPage() {
     const [draggedArcher, setDraggedArcher] = useState<{ archer: Archer; fromTargetId?: string } | null>(null);
     const [hasChanges, setHasChanges] = useState(false);
 
-    useEffect(() => {
-        fetchData();
-    }, [tournamentId]);
-
-    const fetchData = async () => {
+    const fetchData = useCallback(async () => {
         setIsLoading(true);
 
         // Get targets
@@ -70,7 +83,7 @@ export default function AssignmentsPage() {
         const assignmentsByTarget = new Map<string, TargetAssignment[]>();
         const assignedArcherIds = new Set<string>();
 
-        for (const assignment of assignmentsData || []) {
+        for (const assignment of (assignmentsData || []) as AssignmentRow[]) {
             if (!assignmentsByTarget.has(assignment.target_id)) {
                 assignmentsByTarget.set(assignment.target_id, []);
             }
@@ -84,7 +97,7 @@ export default function AssignmentsPage() {
         }
 
         // Create target structures
-        const targetStructures: TargetWithAssignments[] = (targetsData || []).map(target => ({
+        const targetStructures: TargetWithAssignments[] = ((targetsData || []) as Target[]).map((target) => ({
             target,
             assignments: (assignmentsByTarget.get(target.id) || []).sort((a, b) =>
                 a.position.localeCompare(b.position)
@@ -92,14 +105,18 @@ export default function AssignmentsPage() {
         }));
 
         // Find unassigned archers
-        const unassigned = (archersData || []).filter(a => !assignedArcherIds.has(a.id));
+        const unassigned = ((archersData || []) as Archer[]).filter((archer) => !assignedArcherIds.has(archer.id));
 
         setTargets(targetStructures);
         setUnassignedArchers(unassigned);
         setAllArchers(archersData || []);
         setIsLoading(false);
         setHasChanges(false);
-    };
+    }, [supabase, tournamentId]);
+
+    useEffect(() => {
+        fetchData();
+    }, [fetchData]);
 
     const handleDragStart = (archer: Archer, fromTargetId?: string) => {
         setDraggedArcher({ archer, fromTargetId });
@@ -223,39 +240,52 @@ export default function AssignmentsPage() {
         setIsSaving(true);
 
         try {
-            // Delete existing assignments
-            await supabase
-                .from("assignments")
-                .delete()
-                .eq("tournament_id", tournamentId);
+            const desiredAssignments: {
+                tournament_id: string;
+                archer_id: string;
+                target_id: string;
+                position: TargetPosition;
+                turn: ShootingTurn;
+                access_code: string;
+            }[] = [];
 
-            // Create new assignments
-            const newAssignments = [];
             for (const target of targets) {
                 for (const assignment of target.assignments) {
-                    newAssignments.push({
+                    desiredAssignments.push({
                         tournament_id: tournamentId,
                         archer_id: assignment.archerId,
                         target_id: target.target.id,
                         position: assignment.position,
                         turn: assignment.turn,
-                        access_code: `T${target.target.target_number}${assignment.position}`,
+                        access_code: buildAssignmentAccessCode(
+                            tournamentId,
+                            target.target.target_number,
+                            assignment.position
+                        ),
                     });
                 }
             }
 
-            if (newAssignments.length > 0) {
-                const { error } = await supabase
-                    .from("assignments")
-                    .insert(newAssignments);
+            const response = await fetch(`/api/tournaments/${tournamentId}/assignments`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    assignments: desiredAssignments,
+                }),
+            });
 
-                if (error) throw error;
+            const result = await response.json();
+
+            if (!response.ok) {
+                throw new Error(result.error || "No se pudieron guardar las asignaciones");
             }
 
             toast.success("Asignaciones guardadas");
             setHasChanges(false);
-        } catch (error: any) {
-            toast.error("Error al guardar", { description: error.message });
+            fetchData();
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : "Error interno";
+            toast.error("Error al guardar", { description: message });
         } finally {
             setIsSaving(false);
         }
@@ -290,8 +320,9 @@ export default function AssignmentsPage() {
 
             toast.success(`${result.assignments} arqueros asignados automáticamente`);
             fetchData();
-        } catch (error: any) {
-            toast.error("Error al generar", { description: error.message });
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : "Error interno";
+            toast.error("Error al generar", { description: message });
         } finally {
             setIsGenerating(false);
         }
@@ -415,6 +446,9 @@ export default function AssignmentsPage() {
                                                     <Badge variant="outline" className="text-xs">
                                                         {CATEGORY_LABELS[archer.age_category as AgeCategory]}
                                                     </Badge>
+                                                    <Badge variant="outline" className="text-xs">
+                                                        {DIVISION_LABELS[archer.division] || archer.division}
+                                                    </Badge>
                                                 </div>
                                             ))}
                                             {(unassignedByDistance.get(distance) || []).length === 0 && (
@@ -461,6 +495,9 @@ export default function AssignmentsPage() {
                                                             </span>
                                                             <Badge variant="outline" className="text-xs">
                                                                 {CATEGORY_LABELS[archer.age_category as AgeCategory]}
+                                                            </Badge>
+                                                            <Badge variant="outline" className="text-xs">
+                                                                {DIVISION_LABELS[archer.division] || archer.division}
                                                             </Badge>
                                                             <Badge variant="outline" className="text-xs">
                                                                 {turn}

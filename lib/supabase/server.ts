@@ -6,8 +6,13 @@ export async function createClient() {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-    // During build time, env vars might not be set
+    // During local build time env vars might not be set.
+    // In production we fail fast to avoid silently running with invalid config.
     if (!supabaseUrl || !supabaseAnonKey) {
+        if (process.env.NODE_ENV === "production") {
+            throw new Error("Missing Supabase server environment variables.");
+        }
+
         const cookieStore = await cookies();
         return createServerClient(
             "https://placeholder.supabase.co",

@@ -1,12 +1,11 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ArrowLeft, Save, Loader2, Target, Plus, Minus } from "lucide-react";
@@ -32,11 +31,7 @@ export default function TargetSetupPage() {
     const [existingTargets, setExistingTargets] = useState<TargetType[]>([]);
     const [targetConfigs, setTargetConfigs] = useState<TargetConfig[]>([]);
 
-    useEffect(() => {
-        fetchData();
-    }, [tournamentId]);
-
-    const fetchData = async () => {
+    const fetchData = useCallback(async () => {
         setIsLoading(true);
 
         // Get tournament
@@ -87,7 +82,11 @@ export default function TargetSetupPage() {
 
         setTargetConfigs(configs);
         setIsLoading(false);
-    };
+    }, [router, supabase, tournamentId]);
+
+    useEffect(() => {
+        void fetchData();
+    }, [fetchData]);
 
     const updateCount = (distance: number, delta: number) => {
         setTargetConfigs((prev) => {
@@ -138,13 +137,6 @@ export default function TargetSetupPage() {
         setIsSaving(true);
 
         try {
-            // Delete existing targets (this will cascade delete assignments)
-            await supabase
-                .from("targets")
-                .delete()
-                .eq("tournament_id", tournamentId);
-
-            // Create new targets
             const targetsToInsert: { tournament_id: string; target_number: number; distance: number }[] = [];
 
             for (const config of targetConfigs) {
@@ -157,16 +149,24 @@ export default function TargetSetupPage() {
                 }
             }
 
-            const { error: insertError } = await supabase
-                .from("targets")
-                .insert(targetsToInsert);
+            const { error: insertError } = await supabase.rpc(
+                "admin_replace_tournament_targets",
+                {
+                    p_tournament_id: tournamentId,
+                    p_targets: targetsToInsert.map((target) => ({
+                        target_number: target.target_number,
+                        distance: target.distance,
+                    })),
+                }
+            );
 
             if (insertError) throw insertError;
 
             toast.success(`${totalTargets} pacas configuradas correctamente`);
             router.push(`/admin/tournaments/${tournamentId}/assignments`);
-        } catch (error: any) {
-            toast.error("Error al guardar", { description: error.message });
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : "Error interno";
+            toast.error("Error al guardar", { description: message });
         } finally {
             setIsSaving(false);
         }

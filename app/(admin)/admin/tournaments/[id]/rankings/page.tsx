@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -22,7 +22,7 @@ import type { AgeCategory, Gender } from "@/types/database";
 
 interface EndScore {
     endNumber: number;
-    arrows: number[];
+    arrows: (number | null)[];
     total: number;
 }
 
@@ -62,12 +62,63 @@ interface Tournament {
     arrows_per_end: number;
 }
 
-interface Bracket {
+interface QualificationScoreRow {
+    assignment_id: string;
+    end_number: number;
+    arrow_number: number;
+    score: number | null;
+}
+
+interface AssignmentRow {
+    id: string;
+    archer: {
+        id: string;
+        first_name: string;
+        last_name: string;
+        club: string | null;
+        age_category: AgeCategory;
+        gender: Gender;
+        distance: number;
+    } | {
+        id: string;
+        first_name: string;
+        last_name: string;
+        club: string | null;
+        age_category: AgeCategory;
+        gender: Gender;
+        distance: number;
+    }[] | null;
+}
+
+interface MatchArcher {
+    id: string;
+    first_name: string;
+    last_name: string;
+    club: string | null;
+    age_category: AgeCategory;
+    gender: Gender;
+    distance: number;
+}
+
+interface BracketMatchRow {
+    id: string;
+    round_number: number;
+    match_position: number;
+    status: string;
+    winner_id: string | null;
+    archer1_id: string | null;
+    archer2_id: string | null;
+    archer1: MatchArcher | null;
+    archer2: MatchArcher | null;
+}
+
+interface BracketRow {
     id: string;
     category: AgeCategory;
     gender: Gender;
     bracket_size: number;
     is_completed: boolean;
+    matches: BracketMatchRow[] | null;
 }
 
 export default function RankingsPage() {
@@ -90,17 +141,7 @@ export default function RankingsPage() {
     // Available filter options
     const [distances, setDistances] = useState<number[]>([]);
 
-    useEffect(() => {
-        fetchData();
-    }, [tournamentId]);
-
-    const fetchData = async () => {
-        setIsLoading(true);
-        await Promise.all([fetchQualificationRankings(), fetchTournamentResults()]);
-        setIsLoading(false);
-    };
-
-    const fetchQualificationRankings = async () => {
+    const fetchQualificationRankings = useCallback(async () => {
         const { data: tournamentData } = await supabase
             .from("tournaments")
             .select("id, name, qualification_arrows, arrows_per_end")
@@ -123,10 +164,10 @@ export default function RankingsPage() {
             return;
         }
 
-        const assignmentIds = assignments.map(a => a.id);
+        const assignmentRows = assignments as AssignmentRow[];
+        const assignmentIds = assignmentRows.map((assignment) => assignment.id);
 
-        // Fetch ALL scores using pagination (Supabase has a hard 1000 row limit)
-        let allScores: any[] = [];
+        let allScores: QualificationScoreRow[] = [];
         const BATCH_SIZE = 1000;
         let offset = 0;
         let hasMore = true;
@@ -147,7 +188,7 @@ export default function RankingsPage() {
             }
 
             if (batch && batch.length > 0) {
-                allScores = allScores.concat(batch);
+                allScores = allScores.concat(batch as QualificationScoreRow[]);
                 offset += batch.length;
                 hasMore = batch.length === BATCH_SIZE;
             } else {
@@ -156,7 +197,7 @@ export default function RankingsPage() {
         }
 
         const scoresByAssignment = new Map<string, Map<number, (number | null)[]>>();
-        for (const score of allScores || []) {
+        for (const score of allScores) {
             if (!scoresByAssignment.has(score.assignment_id)) {
                 scoresByAssignment.set(score.assignment_id, new Map());
             }
@@ -164,13 +205,17 @@ export default function RankingsPage() {
             if (!endMap.has(score.end_number)) {
                 endMap.set(score.end_number, []);
             }
-            // Use arrow_number as index to ensure correct positioning
             endMap.get(score.end_number)![score.arrow_number - 1] = score.score;
         }
 
-        const rankedArchers: RankedArcher[] = assignments.map(assignment => {
-            const archer = assignment.archer as any;
-            const endMap = scoresByAssignment.get(assignment.id) || new Map();
+        const rankedArchers: RankedArcher[] = assignmentRows.flatMap((assignment) => {
+            const archer = Array.isArray(assignment.archer)
+                ? assignment.archer[0]
+                : assignment.archer;
+            if (!archer) return [];
+
+            const endMap: Map<number, (number | null)[]> =
+                scoresByAssignment.get(assignment.id) || new Map<number, (number | null)[]>();
 
             const endScores: EndScore[] = [];
             let totalScore = 0;
@@ -179,17 +224,20 @@ export default function RankingsPage() {
             let arrowsShot = 0;
 
             for (const [endNumber, arrows] of endMap.entries()) {
-                const endTotal = arrows.reduce((sum: number, s: number | null) => sum + (s === 11 ? 10 : (s ?? 0)), 0);
+                const endTotal = arrows.reduce(
+                    (sum: number, score: number | null) => sum + (score === 11 ? 10 : (score ?? 0)),
+                    0
+                );
                 endScores.push({ endNumber, arrows, total: endTotal });
                 totalScore += endTotal;
-                xCount += arrows.filter((s: number | null) => s === 11).length;
-                tenPlusXCount += arrows.filter((s: number | null) => s === 10 || s === 11).length;
+                xCount += arrows.filter((score: number | null) => score === 11).length;
+                tenPlusXCount += arrows.filter((score: number | null) => score === 10 || score === 11).length;
                 arrowsShot += arrows.length;
             }
 
-            endScores.sort((a, b) => a.endNumber - b.endNumber);
+            endScores.sort((left, right) => left.endNumber - right.endNumber);
 
-            return {
+            return [{
                 archerId: archer.id,
                 assignmentId: assignment.id,
                 firstName: archer.first_name,
@@ -204,16 +252,15 @@ export default function RankingsPage() {
                 arrowsShot,
                 rank: 0,
                 endScores,
-            };
+            }];
         });
 
-        const uniqueDistances = [...new Set(rankedArchers.map(a => a.distance))].sort((a, b) => a - b);
+        const uniqueDistances = [...new Set(rankedArchers.map((archer) => archer.distance))].sort((a, b) => a - b);
         setDistances(uniqueDistances);
         setRankings(rankedArchers);
-    };
+    }, [supabase, tournamentId]);
 
-    const fetchTournamentResults = async () => {
-        // Get all brackets with their matches
+    const fetchTournamentResults = useCallback(async () => {
         const { data: brackets } = await supabase
             .from("elimination_brackets")
             .select(`
@@ -234,18 +281,14 @@ export default function RankingsPage() {
 
         const results: TournamentResult[] = [];
 
-        for (const bracket of brackets) {
-            const matches = (bracket.matches as any[]) || [];
+        for (const bracket of brackets as BracketRow[]) {
+            const matches = bracket.matches || [];
             const totalRounds = Math.log2(bracket.bracket_size);
             const finalRound = totalRounds;
             const semifinalRound = totalRounds - 1;
+            const finalMatch = matches.find((match) => match.round_number === finalRound && match.match_position === 1);
+            const bronzeMatch = matches.find((match) => match.round_number === 0);
 
-            // Find final match
-            const finalMatch = matches.find(m => m.round_number === finalRound && m.match_position === 1);
-            // Find bronze match
-            const bronzeMatch = matches.find(m => m.round_number === 0);
-
-            // Process final match
             if (finalMatch && finalMatch.status === "completed" && finalMatch.winner_id) {
                 const winner = finalMatch.archer1_id === finalMatch.winner_id ? finalMatch.archer1 : finalMatch.archer2;
                 const loser = finalMatch.archer1_id === finalMatch.winner_id ? finalMatch.archer2 : finalMatch.archer1;
@@ -257,7 +300,7 @@ export default function RankingsPage() {
                         lastName: winner.last_name,
                         club: winner.club,
                         ageCategory: bracket.category,
-                        gender: bracket.gender,
+                        gender: winner.gender,
                         distance: winner.distance,
                         position: 1,
                         eliminatedRound: "Final (Oro)",
@@ -270,7 +313,7 @@ export default function RankingsPage() {
                         lastName: loser.last_name,
                         club: loser.club,
                         ageCategory: bracket.category,
-                        gender: bracket.gender,
+                        gender: loser.gender,
                         distance: loser.distance,
                         position: 2,
                         eliminatedRound: "Final (Plata)",
@@ -278,7 +321,6 @@ export default function RankingsPage() {
                 }
             }
 
-            // Process bronze match
             if (bronzeMatch && bronzeMatch.status === "completed" && bronzeMatch.winner_id) {
                 const winner = bronzeMatch.archer1_id === bronzeMatch.winner_id ? bronzeMatch.archer1 : bronzeMatch.archer2;
                 const loser = bronzeMatch.archer1_id === bronzeMatch.winner_id ? bronzeMatch.archer2 : bronzeMatch.archer1;
@@ -290,7 +332,7 @@ export default function RankingsPage() {
                         lastName: winner.last_name,
                         club: winner.club,
                         ageCategory: bracket.category,
-                        gender: bracket.gender,
+                        gender: winner.gender,
                         distance: winner.distance,
                         position: 3,
                         eliminatedRound: "Bronce",
@@ -303,7 +345,7 @@ export default function RankingsPage() {
                         lastName: loser.last_name,
                         club: loser.club,
                         ageCategory: bracket.category,
-                        gender: bracket.gender,
+                        gender: loser.gender,
                         distance: loser.distance,
                         position: 4,
                         eliminatedRound: "4to Lugar",
@@ -311,38 +353,33 @@ export default function RankingsPage() {
                 }
             }
 
-            // Process other matches (eliminated in earlier rounds)
-            const completedMatches = matches.filter(m =>
-                m.status === "completed" &&
-                m.winner_id &&
-                m.round_number !== finalRound &&
-                m.round_number !== 0
+            const completedMatches = matches.filter((match) =>
+                match.status === "completed" &&
+                match.winner_id &&
+                match.round_number !== finalRound &&
+                match.round_number !== 0
             );
 
             for (const match of completedMatches) {
-                // Skip semifinal losers - they're already in bronze match
                 if (match.round_number === semifinalRound) continue;
 
                 const loser = match.archer1_id === match.winner_id ? match.archer2 : match.archer1;
                 if (!loser) continue;
 
-                // Check if this archer is already in results (from finals/bronze)
-                if (results.some(r => r.archerId === loser.id && r.ageCategory === bracket.category)) {
+                if (results.some((result) => result.archerId === loser.id && result.ageCategory === bracket.category)) {
                     continue;
                 }
 
-                // Calculate position based on round eliminated
-                // Round 1 losers = last position, etc.
                 const roundsFromFinal = finalRound - match.round_number;
                 let roundName = "";
                 let basePosition = 5;
 
                 if (roundsFromFinal === 2) {
                     roundName = "Cuartos";
-                    basePosition = 5; // 5-8
+                    basePosition = 5;
                 } else if (roundsFromFinal === 3) {
                     roundName = "1/8";
-                    basePosition = 9; // 9-16
+                    basePosition = 9;
                 } else if (roundsFromFinal === 4) {
                     roundName = "1/16";
                     basePosition = 17;
@@ -357,7 +394,7 @@ export default function RankingsPage() {
                     lastName: loser.last_name,
                     club: loser.club,
                     ageCategory: bracket.category,
-                    gender: bracket.gender,
+                    gender: loser.gender,
                     distance: loser.distance,
                     position: basePosition,
                     eliminatedRound: roundName,
@@ -365,14 +402,27 @@ export default function RankingsPage() {
             }
         }
 
-        // Sort by category and position
-        results.sort((a, b) => {
-            if (a.ageCategory !== b.ageCategory) return a.ageCategory.localeCompare(b.ageCategory);
-            return a.position - b.position;
+        results.sort((left, right) => {
+            if (left.ageCategory !== right.ageCategory) return left.ageCategory.localeCompare(right.ageCategory);
+            return left.position - right.position;
         });
 
         setTournamentResults(results);
-    };
+    }, [supabase, tournamentId]);
+
+    const fetchData = useCallback(async () => {
+        setIsLoading(true);
+        await Promise.all([fetchQualificationRankings(), fetchTournamentResults()]);
+        setIsLoading(false);
+    }, [fetchQualificationRankings, fetchTournamentResults]);
+
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            void fetchData();
+        }, 0);
+
+        return () => clearTimeout(timer);
+    }, [fetchData]);
 
     const handleRefresh = async () => {
         setIsRefreshing(true);
@@ -406,13 +456,15 @@ export default function RankingsPage() {
         return <span className="w-6 h-6 flex items-center justify-center text-sm font-bold text-slate-500 bg-slate-100 rounded-full">{rank}</span>;
     };
 
-    const formatArrowScore = (score: number) => {
+    const formatArrowScore = (score: number | null) => {
+        if (score === null) return "";
         if (score === 11) return "X";
         if (score === 0) return "M";
         return score.toString();
     };
 
-    const getArrowColor = (score: number) => {
+    const getArrowColor = (score: number | null) => {
+        if (score === null) return "bg-white text-slate-300 border-slate-200";
         if (score === 11 || score === 10) return "bg-yellow-100 text-yellow-800 border-yellow-300";
         if (score === 9) return "bg-yellow-50 text-yellow-700 border-yellow-200";
         if (score >= 7) return "bg-red-50 text-red-700 border-red-200";
@@ -432,12 +484,13 @@ export default function RankingsPage() {
             filtered = filtered.filter(a => a.distance === parseInt(distanceFilter));
         }
 
-        const byCategory = new Map<AgeCategory, RankedArcher[]>();
+        const byCategory = new Map<string, RankedArcher[]>();
         for (const archer of filtered) {
-            if (!byCategory.has(archer.ageCategory)) {
-                byCategory.set(archer.ageCategory, []);
+            const key = `${archer.ageCategory}|${archer.distance}`;
+            if (!byCategory.has(key)) {
+                byCategory.set(key, []);
             }
-            byCategory.get(archer.ageCategory)!.push(archer);
+            byCategory.get(key)!.push(archer);
         }
 
         for (const [, archers] of byCategory.entries()) {
@@ -464,12 +517,13 @@ export default function RankingsPage() {
             filtered = filtered.filter(a => a.distance === parseInt(distanceFilter));
         }
 
-        const byCategory = new Map<AgeCategory, TournamentResult[]>();
+        const byCategory = new Map<string, TournamentResult[]>();
         for (const result of filtered) {
-            if (!byCategory.has(result.ageCategory)) {
-                byCategory.set(result.ageCategory, []);
+            const key = `${result.ageCategory}|${result.distance}`;
+            if (!byCategory.has(key)) {
+                byCategory.set(key, []);
             }
-            byCategory.get(result.ageCategory)!.push(result);
+            byCategory.get(key)!.push(result);
         }
 
         // Sort each category by position
@@ -572,13 +626,18 @@ export default function RankingsPage() {
                     {/* Tournament Results Tab */}
                     <TabsContent value="tournament" className="mt-4 space-y-4">
                         {groupedTournament.size > 0 ? (
-                            Array.from(groupedTournament.entries()).map(([category, results]) => (
-                                <Card key={category} className="border-2 border-slate-200 shadow-sm overflow-hidden">
+                            Array.from(groupedTournament.entries()).map(([groupKey, results]) => {
+                                const [category, distance] = groupKey.split("|");
+                                return (
+                                <Card key={groupKey} className="border-2 border-slate-200 shadow-sm overflow-hidden">
                                     <CardHeader className="bg-gradient-to-r from-amber-50 to-yellow-50 border-b border-amber-200 py-3 px-4">
                                         <div className="flex items-center gap-3">
                                             <Crown className="h-5 w-5 text-yellow-600" />
                                             <Badge className="bg-amber-600 text-white text-xs px-2 py-1">
-                                                {CATEGORY_LABELS[category]}
+                                                {CATEGORY_LABELS[category as AgeCategory]}
+                                            </Badge>
+                                            <Badge variant="outline" className="text-xs">
+                                                {distance}m
                                             </Badge>
                                             <span className="text-slate-500 text-sm font-medium">
                                                 {results.length} arquero{results.length !== 1 ? 's' : ''}
@@ -626,7 +685,7 @@ export default function RankingsPage() {
                                         </div>
                                     </CardContent>
                                 </Card>
-                            ))
+                            )})
                         ) : (
                             <Card className="border-2 border-slate-200 shadow-sm">
                                 <CardContent className="py-12 text-center">
@@ -645,12 +704,17 @@ export default function RankingsPage() {
                     {/* Qualification Results Tab */}
                     <TabsContent value="qualification" className="mt-4 space-y-4">
                         {groupedQualification.size > 0 ? (
-                            Array.from(groupedQualification.entries()).map(([category, archers]) => (
-                                <Card key={category} className="border-2 border-slate-200 shadow-sm overflow-hidden">
+                            Array.from(groupedQualification.entries()).map(([groupKey, archers]) => {
+                                const [category, distance] = groupKey.split("|");
+                                return (
+                                <Card key={groupKey} className="border-2 border-slate-200 shadow-sm overflow-hidden">
                                     <CardHeader className="bg-slate-50 border-b border-slate-200 py-3 px-4">
                                         <div className="flex items-center gap-3">
                                             <Badge className="bg-blue-600 text-white text-xs px-2 py-1">
-                                                {CATEGORY_LABELS[category]}
+                                                {CATEGORY_LABELS[category as AgeCategory]}
+                                            </Badge>
+                                            <Badge variant="outline" className="text-xs">
+                                                {distance}m
                                             </Badge>
                                             <span className="text-slate-500 text-sm font-medium">
                                                 {archers.length} arquero{archers.length !== 1 ? 's' : ''}
@@ -759,7 +823,7 @@ export default function RankingsPage() {
                                         </div>
                                     </CardContent>
                                 </Card>
-                            ))
+                            )})
                         ) : (
                             <Card className="border-2 border-slate-200 shadow-sm">
                                 <CardContent className="py-12 text-center">

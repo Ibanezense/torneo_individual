@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -13,6 +13,7 @@ import { FullPageLoader } from "@/components/shared/LoadingSpinner";
 export default function ControlRoomPage() {
     const params = useParams();
     const tournamentId = params.id as string;
+    const router = useRouter();
 
     const { targets, stats, isConnected, isLoading, refetch } = useRealtimeTargets(tournamentId);
 
@@ -166,8 +167,7 @@ export default function ControlRoomPage() {
                             <TargetGrid
                                 targets={targets}
                                 onTargetClick={(targetId) => {
-                                    // TODO: Open target detail modal
-                                    console.log("Target clicked:", targetId);
+                                    router.push(`/scoring/target/${targetId}`);
                                 }}
                             />
                         </CardContent>

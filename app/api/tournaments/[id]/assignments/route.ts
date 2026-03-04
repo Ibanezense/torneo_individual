@@ -1,16 +1,42 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import type { Archer, Target, TargetPosition, ShootingTurn } from "@/types/database";
+import { enforceMutationOrigin } from "@/lib/security/origin";
+
+type ServerSupabaseClient = Awaited<ReturnType<typeof createClient>>;
+
+interface AssignmentInsertInput {
+    tournament_id: string;
+    archer_id: string;
+    target_id: string;
+    position: TargetPosition;
+    turn: ShootingTurn;
+    access_code: string;
+}
+
+type ManualAssignmentInput = AssignmentInsertInput;
+
+function buildAssignmentAccessCode(
+    _tournamentId: string,
+    targetNumber: number,
+    _position: TargetPosition
+): string {
+    void _tournamentId;
+    void _position;
+    return `T${targetNumber}`;
+}
 
 export async function POST(
     request: NextRequest,
     { params }: { params: Promise<{ id: string }> }
 ) {
     try {
+        const forbiddenResponse = enforceMutationOrigin(request);
+        if (forbiddenResponse) return forbiddenResponse;
+
         const { id: tournamentId } = await params;
         const supabase = await createClient();
 
-        // Get tournament
         const { data: tournament, error: tournamentError } = await supabase
             .from("tournaments")
             .select("*")
@@ -18,37 +44,68 @@ export async function POST(
             .single();
 
         if (tournamentError || !tournament) {
-            return NextResponse.json(
-                { error: "Torneo no encontrado" },
-                { status: 404 }
-            );
+            return NextResponse.json({ error: "Torneo no encontrado" }, { status: 404 });
         }
 
-        // Get request body
-        const body = await request.json();
-        const archerIds: string[] = body.archerIds || [];
+        const body = (await request.json()) as {
+            archerIds?: string[];
+            assignments?: ManualAssignmentInput[];
+        };
+
+        if (Array.isArray(body.assignments)) {
+            const desiredAssignments = body.assignments.filter(
+                (assignment): assignment is ManualAssignmentInput =>
+                    Boolean(
+                        assignment &&
+                            assignment.tournament_id === tournamentId &&
+                            typeof assignment.archer_id === "string" &&
+                            typeof assignment.target_id === "string" &&
+                            typeof assignment.position === "string" &&
+                            typeof assignment.turn === "string" &&
+                            typeof assignment.access_code === "string"
+                    )
+            );
+
+            const persistResult = await reconcileAssignments(supabase, tournamentId, desiredAssignments);
+            if (!persistResult.success) {
+                return NextResponse.json({ error: persistResult.error }, { status: 400 });
+            }
+
+            return NextResponse.json({
+                success: true,
+                assignments: desiredAssignments.length,
+            });
+        }
+
+        const archerIds = Array.isArray(body.archerIds)
+            ? body.archerIds.filter((id): id is string => typeof id === "string" && id.length > 0)
+            : [];
 
         if (archerIds.length === 0) {
-            return NextResponse.json(
-                { error: "No se seleccionaron arqueros" },
-                { status: 400 }
-            );
+            return NextResponse.json({ error: "No se seleccionaron arqueros" }, { status: 400 });
         }
 
-        // Get archers
         const { data: archers, error: archersError } = await supabase
             .from("archers")
             .select("*")
             .in("id", archerIds);
 
         if (archersError || !archers) {
+            return NextResponse.json({ error: "Error al obtener arqueros" }, { status: 500 });
+        }
+
+        if (archers.length !== archerIds.length) {
+            const foundIds = new Set(archers.map((archer) => archer.id));
+            const missing = archerIds.filter((id) => !foundIds.has(id));
             return NextResponse.json(
-                { error: "Error al obtener arqueros" },
-                { status: 500 }
+                {
+                    error: "Algunos arqueros no existen en la base de datos",
+                    missingArcherIds: missing,
+                },
+                { status: 400 }
             );
         }
 
-        // Get existing targets for this tournament
         const { data: existingTargets, error: targetsError } = await supabase
             .from("targets")
             .select("*")
@@ -56,10 +113,7 @@ export async function POST(
             .order("target_number");
 
         if (targetsError) {
-            return NextResponse.json(
-                { error: "Error al obtener pacas" },
-                { status: 500 }
-            );
+            return NextResponse.json({ error: "Error al obtener pacas" }, { status: 500 });
         }
 
         if (!existingTargets || existingTargets.length === 0) {
@@ -69,24 +123,16 @@ export async function POST(
             );
         }
 
-        // Delete existing assignments for this tournament
-        await supabase
-            .from("assignments")
-            .delete()
-            .eq("tournament_id", tournamentId);
-
-        // Group archers by distance AND category (but allow gender mixing)
-        // Key format: "distance-category" e.g., "20-u18"
         const archersByGroup = new Map<string, Archer[]>();
         for (const archer of archers) {
-            const key = `${archer.distance}-${archer.age_category}`;
+            const division = archer.division || "recurvo";
+            const key = `${archer.distance}|${archer.age_category}|${division}`;
             if (!archersByGroup.has(key)) {
                 archersByGroup.set(key, []);
             }
             archersByGroup.get(key)!.push(archer);
         }
 
-        // Group targets by distance
         const targetsByDistance = new Map<number, Target[]>();
         for (const target of existingTargets) {
             if (!targetsByDistance.has(target.distance)) {
@@ -95,59 +141,45 @@ export async function POST(
             targetsByDistance.get(target.distance)!.push(target);
         }
 
-        // Track which targets have been used and their current position
-        const targetUsage = new Map<string, number>(); // targetId -> next available position (0-3)
-
-        // Create assignments
-        const assignments: {
-            tournament_id: string;
-            archer_id: string;
-            target_id: string;
-            position: TargetPosition;
-            turn: ShootingTurn;
-            access_code: string;
-        }[] = [];
+        const targetUsage = new Map<string, number>();
+        const assignments: AssignmentInsertInput[] = [];
+        const unassignedArchers: Archer[] = [];
 
         const positions: TargetPosition[] = ["A", "B", "C", "D"];
         const turns: ShootingTurn[] = ["AB", "AB", "CD", "CD"];
 
-        // Process each group (distance + category)
         for (const [groupKey, groupArchers] of archersByGroup) {
-            const [distanceStr] = groupKey.split("-");
-            const distance = parseInt(distanceStr);
+            const [distanceStr] = groupKey.split("|");
+            const distance = parseInt(distanceStr, 10);
             const distanceTargets = targetsByDistance.get(distance) || [];
 
             if (distanceTargets.length === 0) {
                 console.warn(`No targets configured for distance ${distance}m`);
+                unassignedArchers.push(...groupArchers);
                 continue;
             }
 
-            // Shuffle archers within the group (mixes genders randomly)
             const shuffledArchers = shuffleArray([...groupArchers]);
             const archerCount = shuffledArchers.length;
-
             if (archerCount === 0) continue;
 
-            // Find available targets for this distance (sorted by usage - fill partially used first)
             const availableTargets = distanceTargets
-                .map(target => ({
+                .map((target) => ({
                     target,
                     used: targetUsage.get(target.id) || 0,
                 }))
-                .filter(t => t.used < 4)
-                .sort((a, b) => b.used - a.used); // Partially filled targets first
+                .filter((item) => item.used < 4)
+                .sort((a, b) => b.used - a.used);
 
             if (availableTargets.length === 0) {
                 console.warn(`No available targets for ${distance}m`);
+                unassignedArchers.push(...groupArchers);
                 continue;
             }
 
-            // Calculate how many targets this group needs exclusively
-            // First, check if there's a partially filled target we should complete
             let archerIndex = 0;
             let targetIndex = 0;
 
-            // Step 1: Complete any partially filled target first (from previous category)
             if (availableTargets[0].used > 0 && availableTargets[0].used < 4) {
                 const partialTarget = availableTargets[0];
                 const slotsToFill = 4 - partialTarget.used;
@@ -161,39 +193,41 @@ export async function POST(
                         target_id: partialTarget.target.id,
                         position: positions[pos],
                         turn: turns[pos],
-                        access_code: `T${partialTarget.target.target_number}${positions[pos]}`,
+                        access_code: buildAssignmentAccessCode(
+                            tournamentId,
+                            partialTarget.target.target_number,
+                            positions[pos]
+                        ),
                     });
                     targetUsage.set(partialTarget.target.id, pos + 1);
                     archerIndex++;
                 }
-                targetIndex = 1; // Move to next target
+                targetIndex = 1;
             }
 
-            // Step 2: Get remaining archers and empty targets
             const remainingArchers = archerCount - archerIndex;
-            const emptyTargets = availableTargets.slice(targetIndex).filter(t => t.used === 0);
+            const emptyTargets = availableTargets.slice(targetIndex).filter((item) => item.used === 0);
 
             if (remainingArchers > 0 && emptyTargets.length > 0) {
-                // Calculate how many targets we need for remaining archers
                 const targetsNeeded = Math.ceil(remainingArchers / 4);
                 const targetsToUse = Math.min(targetsNeeded, emptyTargets.length);
-
-                // Calculate balanced distribution for these targets
                 const basePerTarget = Math.floor(remainingArchers / targetsToUse);
                 const remainder = remainingArchers % targetsToUse;
 
-                // Create distribution: first 'remainder' targets get base+1, rest get base
                 const distribution: number[] = [];
                 for (let i = 0; i < targetsToUse; i++) {
                     distribution.push(basePerTarget + (i < remainder ? 1 : 0));
                 }
 
-                // Assign archers according to distribution
-                for (let t = 0; t < targetsToUse; t++) {
-                    const targetInfo = emptyTargets[t];
-                    const archersForThis = distribution[t];
+                for (let targetIdx = 0; targetIdx < targetsToUse; targetIdx++) {
+                    const targetInfo = emptyTargets[targetIdx];
+                    const archersForThis = distribution[targetIdx];
 
-                    for (let a = 0; a < archersForThis && archerIndex < shuffledArchers.length; a++) {
+                    for (
+                        let assignmentIdx = 0;
+                        assignmentIdx < archersForThis && archerIndex < shuffledArchers.length;
+                        assignmentIdx++
+                    ) {
                         const pos = targetUsage.get(targetInfo.target.id) || 0;
                         assignments.push({
                             tournament_id: tournamentId,
@@ -201,7 +235,11 @@ export async function POST(
                             target_id: targetInfo.target.id,
                             position: positions[pos],
                             turn: turns[pos],
-                            access_code: `T${targetInfo.target.target_number}${positions[pos]}`,
+                            access_code: buildAssignmentAccessCode(
+                                tournamentId,
+                                targetInfo.target.target_number,
+                                positions[pos]
+                            ),
                         });
                         targetUsage.set(targetInfo.target.id, pos + 1);
                         archerIndex++;
@@ -209,49 +247,51 @@ export async function POST(
                 }
             }
 
-            // Log any unassigned archers
             if (archerIndex < shuffledArchers.length) {
-                console.warn(`${shuffledArchers.length - archerIndex} archers unassigned at ${distance}m - not enough targets`);
+                console.warn(
+                    `${shuffledArchers.length - archerIndex} archers unassigned at ${distance}m - not enough targets`
+                );
+                unassignedArchers.push(...shuffledArchers.slice(archerIndex));
             }
         }
 
-        if (assignments.length === 0) {
+        if (assignments.length === 0 || unassignedArchers.length > 0) {
+            const details = unassignedArchers.slice(0, 10).map((archer) => ({
+                id: archer.id,
+                name: `${archer.first_name} ${archer.last_name}`,
+                distance: archer.distance,
+                category: archer.age_category,
+                division: archer.division,
+            }));
+
             return NextResponse.json(
-                { error: "No se pudieron crear asignaciones. Verifica que las distancias de los arqueros coincidan con las pacas configuradas." },
+                {
+                    error: "No hay suficientes pacas para asignar a todos los arqueros seleccionados.",
+                    unassignedCount: unassignedArchers.length,
+                    details,
+                },
                 { status: 400 }
             );
         }
 
-        // Insert assignments
-        const { data: insertedAssignments, error: assignmentsError } = await supabase
-            .from("assignments")
-            .insert(assignments)
-            .select();
-
-        if (assignmentsError) {
-            return NextResponse.json(
-                { error: "Error al crear asignaciones: " + assignmentsError.message },
-                { status: 500 }
-            );
+        const persistResult = await reconcileAssignments(supabase, tournamentId, assignments);
+        if (!persistResult.success) {
+            return NextResponse.json({ error: persistResult.error }, { status: 500 });
         }
 
-        // Count how many targets are actually used
-        const usedTargetIds = new Set(assignments.map(a => a.target_id));
+        const usedTargetIds = new Set(assignments.map((assignment) => assignment.target_id));
 
         return NextResponse.json({
             success: true,
             targets: usedTargetIds.size,
-            assignments: insertedAssignments.length,
+            assignments: assignments.length,
         });
-    } catch (error: any) {
-        return NextResponse.json(
-            { error: error.message || "Error interno" },
-            { status: 500 }
-        );
+    } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : "Error interno";
+        return NextResponse.json({ error: message }, { status: 500 });
     }
 }
 
-// Fisher-Yates shuffle
 function shuffleArray<T>(array: T[]): T[] {
     const result = [...array];
     for (let i = result.length - 1; i > 0; i--) {
@@ -262,7 +302,7 @@ function shuffleArray<T>(array: T[]): T[] {
 }
 
 export async function GET(
-    request: NextRequest,
+    _request: NextRequest,
     { params }: { params: Promise<{ id: string }> }
 ) {
     try {
@@ -271,26 +311,49 @@ export async function GET(
 
         const { data: assignments, error } = await supabase
             .from("assignments")
-            .select(`
+            .select(
+                `
         *,
         archer:archers(*),
         target:targets(*)
-      `)
+      `
+            )
             .eq("tournament_id", tournamentId)
             .order("target_id");
 
         if (error) {
-            return NextResponse.json(
-                { error: error.message },
-                { status: 500 }
-            );
+            return NextResponse.json({ error: error.message }, { status: 500 });
         }
 
         return NextResponse.json({ assignments });
-    } catch (error: any) {
-        return NextResponse.json(
-            { error: error.message || "Error interno" },
-            { status: 500 }
-        );
+    } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : "Error interno";
+        return NextResponse.json({ error: message }, { status: 500 });
     }
+}
+
+async function reconcileAssignments(
+    supabase: ServerSupabaseClient,
+    tournamentId: string,
+    desiredAssignments: AssignmentInsertInput[]
+): Promise<{ success: true } | { success: false; error: string }> {
+    const { error } = await supabase.rpc("admin_replace_tournament_assignments", {
+        p_tournament_id: tournamentId,
+        p_assignments: desiredAssignments.map((assignment) => ({
+            archer_id: assignment.archer_id,
+            target_id: assignment.target_id,
+            position: assignment.position,
+            turn: assignment.turn,
+            access_code: assignment.access_code,
+        })),
+    });
+
+    if (error) {
+        return {
+            success: false,
+            error: error.message,
+        };
+    }
+
+    return { success: true };
 }

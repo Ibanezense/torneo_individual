@@ -95,8 +95,9 @@ export function TournamentStatusControl({ tournamentId, currentStatus }: Tournam
             });
 
             router.refresh();
-        } catch (error: any) {
-            toast.error("Error", { description: error.message });
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : "Error interno";
+            toast.error("Error", { description: message });
         } finally {
             setIsUpdating(false);
         }

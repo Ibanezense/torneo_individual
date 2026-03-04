@@ -13,6 +13,8 @@ export type AgeCategory =
     | "master"
     | "open";
 
+export type TournamentDivision = "recurvo" | "compuesto" | "barebow";
+
 export type Gender = "male" | "female";
 
 export type AssignmentStatus = "inactive" | "scoring" | "confirmed" | "conflict";
@@ -36,9 +38,15 @@ export interface Tournament {
     name: string;
     type: TournamentType;
     distances: number[];
+    categories?: AgeCategory[] | null;
+    divisions?: TournamentDivision[] | null;
+    split_brackets_by_gender?: boolean;
+    split_brackets_by_division?: boolean;
     status: TournamentStatus;
     qualification_arrows: number;
     arrows_per_end: number;
+    qualification_rounds_count?: number;
+    ends_per_round?: number;
     elimination_arrows_per_set: number;
     points_to_win_match: number;
     date: string;
@@ -55,7 +63,7 @@ export interface Archer {
     club: string | null;
     age_category: AgeCategory;
     gender: Gender;
-    division: string;
+    division: TournamentDivision;
     distance: number;
     created_at: string;
     updated_at: string;
@@ -90,6 +98,8 @@ export interface Assignment {
 export interface QualificationScore {
     id: string;
     assignment_id: string;
+    round_number?: number;
+    end_in_round?: number;
     end_number: number;
     arrow_number: number;
     score: number | null;
@@ -105,10 +115,30 @@ export interface QualificationScore {
 export interface QualificationEnd {
     id: string;
     assignment_id: string;
+    round_number?: number;
+    end_in_round?: number;
     end_number: number;
     end_total: number;
+    ten_plus_x_count?: number;
+    x_count?: number;
+    arrows_shot?: number;
     is_confirmed: boolean;
     confirmed_at: string | null;
+}
+
+export interface QualificationRound {
+    id: string;
+    assignment_id: string;
+    round_number: number;
+    round_total: number;
+    ten_plus_x_count: number;
+    x_count: number;
+    arrows_shot: number;
+    ends_completed: number;
+    is_confirmed: boolean;
+    confirmed_at: string | null;
+    created_at: string;
+    updated_at: string;
 }
 
 export interface EliminationBracket {

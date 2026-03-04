@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -36,6 +36,22 @@ interface TargetData {
     assignments: ArcherAssignment[];
 }
 
+interface ArcherRow {
+    id: string;
+    first_name: string;
+    last_name: string;
+    age_category: string;
+    club: string | null;
+}
+
+interface AssignmentRow {
+    id: string;
+    position: string;
+    turn: string;
+    current_end: number;
+    archer: ArcherRow | ArcherRow[] | null;
+}
+
 export default function TargetSummaryPage() {
     const params = useParams();
     const router = useRouter();
@@ -45,11 +61,7 @@ export default function TargetSummaryPage() {
     const [isLoading, setIsLoading] = useState(true);
     const [targetData, setTargetData] = useState<TargetData | null>(null);
 
-    useEffect(() => {
-        fetchTargetData();
-    }, [targetId]);
-
-    const fetchTargetData = async () => {
+    const fetchTargetData = useCallback(async () => {
         setIsLoading(true);
 
         const { data: target, error: targetError } = await supabase
@@ -82,7 +94,8 @@ export default function TargetSummaryPage() {
             .eq("target_id", targetId)
             .order("position");
 
-        const assignmentIds = assignments?.map(a => a.id) || [];
+        const assignmentRows = (assignments || []) as AssignmentRow[];
+        const assignmentIds = assignmentRows.map((assignment) => assignment.id);
         const { data: allScores } = await supabase
             .from("qualification_scores")
             .select("assignment_id, end_number, arrow_number, score")
@@ -103,8 +116,8 @@ export default function TargetSummaryPage() {
             assignmentScores.get(score.end_number)![score.arrow_number - 1] = score.score;
         }
 
-        const archerAssignments: ArcherAssignment[] = (assignments || []).map(a => {
-            const assignmentScores = scoresByAssignment.get(a.id) || new Map();
+        const archerAssignments: ArcherAssignment[] = assignmentRows.map((assignment) => {
+            const assignmentScores = scoresByAssignment.get(assignment.id) || new Map();
             const scoresArray: number[][] = [];
 
             let totalScore = 0;
@@ -115,11 +128,17 @@ export default function TargetSummaryPage() {
             }
 
             return {
-                id: a.id,
-                position: a.position,
-                turn: a.turn,
-                current_end: a.current_end || 1,
-                archer: a.archer as any,
+                id: assignment.id,
+                position: assignment.position,
+                turn: assignment.turn,
+                current_end: assignment.current_end || 1,
+                archer: (Array.isArray(assignment.archer) ? assignment.archer[0] : assignment.archer) || {
+                    id: "",
+                    first_name: "Arquero",
+                    last_name: "",
+                    age_category: "open",
+                    club: null,
+                },
                 scores: scoresArray,
                 totalScore,
             };
@@ -134,7 +153,15 @@ export default function TargetSummaryPage() {
         });
 
         setIsLoading(false);
-    };
+    }, [supabase, targetId]);
+
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            void fetchTargetData();
+        }, 0);
+
+        return () => clearTimeout(timer);
+    }, [fetchTargetData]);
 
     const handleBack = () => {
         router.push(`/scoring/target/${targetId}`);

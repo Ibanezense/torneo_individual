@@ -1,10 +1,18 @@
-import Link from "next/link";
+﻿import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+    Card,
+    CardContent,
+    CardDescription,
+    CardFooter,
+    CardHeader,
+    CardTitle,
+} from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Plus, Calendar, MapPin, Target } from "lucide-react";
 import type { Tournament } from "@/types/database";
+import { TournamentDeleteButton } from "@/components/admin/TournamentDeleteButton";
 
 export const dynamic = "force-dynamic";
 
@@ -18,8 +26,8 @@ const statusColors: Record<string, string> = {
 
 const statusLabels: Record<string, string> = {
     draft: "Borrador",
-    registration: "Inscripción",
-    qualification: "Clasificación",
+    registration: "Inscripcion",
+    qualification: "Clasificacion",
     elimination: "Eliminatorias",
     completed: "Finalizado",
 };
@@ -41,9 +49,7 @@ export default async function TournamentsPage() {
             <div className="flex items-center justify-between">
                 <div>
                     <h2 className="text-3xl font-bold tracking-tight">Torneos</h2>
-                    <p className="text-muted-foreground">
-                        Gestiona tus torneos de tiro con arco
-                    </p>
+                    <p className="text-muted-foreground">Gestiona tus torneos de tiro con arco</p>
                 </div>
                 <Button asChild>
                     <Link href="/admin/tournaments/new">
@@ -56,11 +62,8 @@ export default async function TournamentsPage() {
             {tournaments && tournaments.length > 0 ? (
                 <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                     {tournaments.map((tournament: Tournament) => (
-                        <Link
-                            key={tournament.id}
-                            href={`/admin/tournaments/${tournament.id}`}
-                        >
-                            <Card className="h-full cursor-pointer transition-shadow hover:shadow-lg">
+                        <Card key={tournament.id} className="h-full transition-shadow hover:shadow-lg">
+                            <Link href={`/admin/tournaments/${tournament.id}`} className="block">
                                 <CardHeader className="pb-2">
                                     <div className="flex items-start justify-between">
                                         <CardTitle className="text-lg">{tournament.name}</CardTitle>
@@ -70,10 +73,10 @@ export default async function TournamentsPage() {
                                     </div>
                                     <CardDescription className="flex items-center gap-1">
                                         <Target className="h-3 w-3" />
-                                        {tournament.type === "indoor" ? "Indoor" : "Outdoor"} • {tournament.distances?.join("m, ") || ""}m
+                                        {tournament.type === "indoor" ? "Indoor" : "Outdoor"} - {tournament.distances?.join("m, ") || ""}m
                                     </CardDescription>
                                 </CardHeader>
-                                <CardContent>
+                                <CardContent className="pb-0">
                                     <div className="space-y-2 text-sm text-muted-foreground">
                                         <div className="flex items-center gap-2">
                                             <Calendar className="h-4 w-4" />
@@ -96,8 +99,18 @@ export default async function TournamentsPage() {
                                         </div>
                                     </div>
                                 </CardContent>
-                            </Card>
-                        </Link>
+                            </Link>
+
+                            <CardFooter className="mt-auto justify-between border-t pt-4">
+                                <Button asChild size="sm" variant="outline">
+                                    <Link href={`/admin/tournaments/${tournament.id}`}>Abrir</Link>
+                                </Button>
+                                <TournamentDeleteButton
+                                    tournamentId={tournament.id}
+                                    tournamentName={tournament.name}
+                                />
+                            </CardFooter>
+                        </Card>
                     ))}
                 </div>
             ) : (

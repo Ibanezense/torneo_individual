@@ -28,6 +28,8 @@ export default function LiveTournamentLayout({
     const [isLoading, setIsLoading] = useState(true);
 
     useEffect(() => {
+        let active = true;
+
         const fetchTournament = async () => {
             const { data } = await supabase
                 .from("tournaments")
@@ -35,12 +37,17 @@ export default function LiveTournamentLayout({
                 .eq("id", tournamentId)
                 .single();
 
+            if (!active) return;
             setTournament(data);
             setIsLoading(false);
         };
 
-        fetchTournament();
-    }, [tournamentId]);
+        void fetchTournament();
+
+        return () => {
+            active = false;
+        };
+    }, [supabase, tournamentId]);
 
     const navItems = [
         {

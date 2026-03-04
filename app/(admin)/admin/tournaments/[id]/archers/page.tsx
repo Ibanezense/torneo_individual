@@ -2,6 +2,9 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
+import { useCallback, useEffect, useState } from "react";
+import { toast } from "sonner";
+import { ArrowLeft, Users, Shield, Target, Filter, CheckCircle2 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,17 +17,19 @@ import {
     TableHeader,
     TableRow,
 } from "@/components/ui/table";
-import { ArrowLeft, Users, Shield, Target, Filter, CheckCircle2 } from "lucide-react";
+import { ArcherCreateForm } from "@/components/admin/ArcherCreateForm";
 import { ArcherImporter } from "@/components/admin/ArcherImporter";
-import { CATEGORY_LABELS, GENDER_LABELS } from "@/lib/constants/categories";
-import { useEffect, useState } from "react";
-import { toast } from "sonner";
-import type { Archer } from "@/types/database";
+import { ArcherEditDialog } from "@/components/admin/ArcherEditDialog";
+import { ArcherDeleteButton } from "@/components/admin/ArcherDeleteButton";
+import { CATEGORY_LABELS, DIVISION_LABELS, GENDER_LABELS } from "@/lib/constants/categories";
+import type { AgeCategory, Archer, TournamentDivision } from "@/types/database";
 
 interface Tournament {
     id: string;
     name: string;
     distances: number[];
+    categories?: AgeCategory[] | null;
+    divisions?: TournamentDivision[] | null;
 }
 
 export default function TournamentArchersPage() {
@@ -38,22 +43,18 @@ export default function TournamentArchersPage() {
     const [assignedIds, setAssignedIds] = useState<Set<string>>(new Set());
     const [searchTerm, setSearchTerm] = useState("");
 
-    useEffect(() => {
-        loadData();
-    }, [id]);
-
-    const loadData = async () => {
+    const loadData = useCallback(async () => {
         try {
             setLoading(true);
 
-            const { data: tourData, error: tourError } = await supabase
+            const { data: tournamentData, error: tournamentError } = await supabase
                 .from("tournaments")
                 .select("*")
                 .eq("id", id)
                 .single();
 
-            if (tourError) throw tourError;
-            setTournament(tourData);
+            if (tournamentError) throw tournamentError;
+            setTournament(tournamentData);
 
             const { data: archersData, error: archersError } = await supabase
                 .from("archers")
@@ -61,44 +62,57 @@ export default function TournamentArchersPage() {
                 .order("last_name", { ascending: true });
 
             if (archersError) throw archersError;
-            setArchers(archersData || []);
+            setArchers((archersData || []) as Archer[]);
 
-            const { data: assignData, error: assignError } = await supabase
+            const { data: assignmentsData, error: assignmentsError } = await supabase
                 .from("assignments")
                 .select("archer_id")
                 .eq("tournament_id", id);
 
-            if (assignError) throw assignError;
-            setAssignedIds(new Set(assignData?.map(a => a.archer_id) || []));
-
-        } catch (err) {
-            console.error(err);
+            if (assignmentsError) throw assignmentsError;
+            setAssignedIds(
+                new Set((assignmentsData || []).map((assignment: { archer_id: string }) => assignment.archer_id))
+            );
+        } catch (error) {
+            console.error(error);
             toast.error("Error cargando datos");
         } finally {
             setLoading(false);
         }
-    };
+    }, [id, supabase]);
+
+    useEffect(() => {
+        loadData();
+    }, [loadData]);
 
     if (loading) {
-        return <div className="flex h-96 items-center justify-center"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div></div>;
+        return (
+            <div className="flex h-96 items-center justify-center">
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600" />
+            </div>
+        );
     }
 
-    if (!tournament) return <div className="p-8 text-center text-slate-500">Torneo no encontrado</div>;
+    if (!tournament) {
+        return <div className="p-8 text-center text-slate-500">Torneo no encontrado</div>;
+    }
 
-    const filteredArchers = archers.filter(a =>
-        (a.first_name + " " + a.last_name).toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (a.club || "").toLowerCase().includes(searchTerm.toLowerCase())
-    );
+    const filteredArchers = archers.filter((archer) => {
+        const fullName = `${archer.first_name} ${archer.last_name}`.toLowerCase();
+        return (
+            fullName.includes(searchTerm.toLowerCase()) ||
+            (archer.club || "").toLowerCase().includes(searchTerm.toLowerCase())
+        );
+    });
 
     const stats = {
         total: archers.length,
         assigned: assignedIds.size,
-        unassigned: archers.length - assignedIds.size
+        unassigned: archers.length - assignedIds.size,
     };
 
     return (
         <div className="min-h-screen bg-white space-y-6 pb-20">
-            {/* Header Section - LIGHT MODE for outdoor visibility */}
             <div className="bg-gradient-to-b from-slate-100 to-white border-b border-slate-200 -mx-6 -mt-6 px-8 py-8">
                 <div className="max-w-7xl mx-auto">
                     <div className="flex items-center gap-4 mb-6">
@@ -110,19 +124,18 @@ export default function TournamentArchersPage() {
                         <div>
                             <div className="flex items-center gap-3">
                                 <h1 className="text-2xl md:text-3xl font-black tracking-tight text-slate-900 uppercase">
-                                    Gestión de Arqueros
+                                    Gestion de Arqueros
                                 </h1>
                                 <Badge className="bg-blue-600 text-white border-0 text-sm">
                                     {tournament.name}
                                 </Badge>
                             </div>
                             <p className="text-slate-600 mt-1 font-medium">
-                                Importa y administra el padrón de atletas
+                                Importa y administra el padron de atletas
                             </p>
                         </div>
                     </div>
 
-                    {/* Quick Stats - Light cards */}
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
                         <div className="bg-white border-2 border-blue-200 rounded-xl p-4 flex items-center gap-4 shadow-sm">
                             <div className="bg-blue-100 p-3 rounded-lg">
@@ -156,27 +169,38 @@ export default function TournamentArchersPage() {
             </div>
 
             <div className="max-w-7xl mx-auto px-6 space-y-6">
-                {/* Importer Section */}
+                <ArcherCreateForm
+                    allowedDistances={tournament.distances || []}
+                    allowedCategories={tournament.categories || undefined}
+                    allowedDivisions={tournament.divisions || undefined}
+                    onCreated={loadData}
+                />
+
                 <div className="bg-white rounded-xl shadow-sm border-2 border-slate-200 overflow-hidden">
                     <div className="bg-slate-50 px-6 py-4 border-b border-slate-200 flex justify-between items-center">
                         <div>
-                            <h3 className="font-bold text-slate-800 text-lg">Importación Masiva</h3>
-                            <p className="text-slate-500 text-sm">Carga arqueros desde Excel o CSV</p>
+                            <h3 className="font-bold text-slate-800 text-lg">Importacion Masiva</h3>
+                            <p className="text-slate-500 text-sm">Carga arqueros desde CSV</p>
                         </div>
                         <Badge variant="outline" className="bg-white border-slate-300 text-slate-600">
-                            Soporta .xlsx, .csv
+                            Soporta .csv
                         </Badge>
                     </div>
                     <div className="p-6">
-                        <ArcherImporter tournamentId={id} availableDistances={tournament.distances || []} onSuccess={loadData} />
+                        <ArcherImporter
+                            tournamentId={id}
+                            availableDistances={tournament.distances || []}
+                            allowedCategories={tournament.categories || undefined}
+                            allowedDivisions={tournament.divisions || undefined}
+                            onSuccess={loadData}
+                        />
                     </div>
                 </div>
 
-                {/* Archers List */}
                 <Card className="border-2 border-slate-200 shadow-sm overflow-hidden">
                     <CardHeader className="bg-slate-50 border-b border-slate-200 flex flex-row items-center justify-between pb-4">
                         <div className="space-y-1">
-                            <CardTitle className="text-xl font-bold text-slate-800">Padrón de Arqueros</CardTitle>
+                            <CardTitle className="text-xl font-bold text-slate-800">Padron de Arqueros</CardTitle>
                             <CardDescription className="text-slate-500">
                                 Listado completo de atletas registrados
                             </CardDescription>
@@ -200,29 +224,39 @@ export default function TournamentArchersPage() {
                                         <TableRow>
                                             <TableHead className="font-bold text-slate-700 py-3">Nombre</TableHead>
                                             <TableHead className="font-bold text-slate-700">Club</TableHead>
-                                            <TableHead className="font-bold text-slate-700">Categoría</TableHead>
-                                            <TableHead className="font-bold text-slate-700">Género</TableHead>
+                                            <TableHead className="font-bold text-slate-700">Categoria</TableHead>
+                                            <TableHead className="font-bold text-slate-700">Genero</TableHead>
+                                            <TableHead className="font-bold text-slate-700">Division</TableHead>
                                             <TableHead className="font-bold text-slate-700 text-center">Distancia</TableHead>
                                             <TableHead className="font-bold text-slate-700 text-center">Estado</TableHead>
+                                            <TableHead className="font-bold text-slate-700 text-center">Acciones</TableHead>
                                         </TableRow>
                                     </TableHeader>
                                     <TableBody>
                                         {filteredArchers.map((archer) => {
                                             const isAssigned = assignedIds.has(archer.id);
                                             return (
-                                                <TableRow key={archer.id} className="hover:bg-slate-50 transition-colors border-b border-slate-100">
+                                                <TableRow
+                                                    key={archer.id}
+                                                    className="hover:bg-slate-50 transition-colors border-b border-slate-100"
+                                                >
                                                     <TableCell className="font-bold text-slate-900 py-4">
                                                         {archer.last_name}, {archer.first_name}
                                                     </TableCell>
                                                     <TableCell className="text-slate-700 font-medium">{archer.club || "-"}</TableCell>
                                                     <TableCell>
                                                         <Badge variant="outline" className="font-semibold text-xs uppercase bg-slate-100 border-slate-300 text-slate-700">
-                                                            {CATEGORY_LABELS[archer.age_category as keyof typeof CATEGORY_LABELS]}
+                                                            {CATEGORY_LABELS[archer.age_category]}
                                                         </Badge>
                                                     </TableCell>
                                                     <TableCell>
                                                         <Badge variant="outline" className="font-semibold text-xs uppercase bg-slate-100 border-slate-300 text-slate-700">
-                                                            {GENDER_LABELS[archer.gender as keyof typeof GENDER_LABELS]}
+                                                            {GENDER_LABELS[archer.gender]}
+                                                        </Badge>
+                                                    </TableCell>
+                                                    <TableCell>
+                                                        <Badge variant="outline" className="font-semibold text-xs uppercase bg-slate-100 border-slate-300 text-slate-700">
+                                                            {DIVISION_LABELS[archer.division] || archer.division}
                                                         </Badge>
                                                     </TableCell>
                                                     <TableCell className="text-center">
@@ -241,6 +275,22 @@ export default function TournamentArchersPage() {
                                                             </Badge>
                                                         )}
                                                     </TableCell>
+                                                    <TableCell className="text-center">
+                                                        <div className="flex items-center justify-center gap-2">
+                                                            <ArcherEditDialog
+                                                                archer={archer}
+                                                                allowedDistances={tournament.distances || []}
+                                                                allowedCategories={tournament.categories || undefined}
+                                                                allowedDivisions={tournament.divisions || undefined}
+                                                                onSaved={loadData}
+                                                            />
+                                                            <ArcherDeleteButton
+                                                                archerId={archer.id}
+                                                                archerName={`${archer.first_name} ${archer.last_name}`}
+                                                                onDeleted={loadData}
+                                                            />
+                                                        </div>
+                                                    </TableCell>
                                                 </TableRow>
                                             );
                                         })}
@@ -254,7 +304,7 @@ export default function TournamentArchersPage() {
                                 </div>
                                 <h3 className="font-bold text-slate-900 text-lg">No se encontraron arqueros</h3>
                                 <p className="text-slate-500 max-w-sm mt-2">
-                                    No hay arqueros que coincidan con tu búsqueda o aún no has importado ninguno.
+                                    No hay arqueros que coincidan con tu busqueda o aun no has importado ninguno.
                                 </p>
                             </div>
                         )}

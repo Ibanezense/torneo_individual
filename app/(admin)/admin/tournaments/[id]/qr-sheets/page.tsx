@@ -1,15 +1,15 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import Image from "next/image";
+import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { ArrowLeft, Download, Printer, QrCode } from "lucide-react";
+import { ArrowLeft, Printer, QrCode } from "lucide-react";
 import { FullPageLoader } from "@/components/shared/LoadingSpinner";
-import { toast } from "sonner";
 import QRCode from "qrcode";
 import type { Target, Assignment, Archer } from "@/types/database";
 
@@ -27,11 +27,7 @@ export default function QRSheetsPage() {
     const [tournamentName, setTournamentName] = useState("");
     const [qrCodes, setQrCodes] = useState<Map<string, string>>(new Map());
 
-    useEffect(() => {
-        fetchData();
-    }, [tournamentId]);
-
-    const fetchData = async () => {
+    const fetchData = useCallback(async () => {
         setIsLoading(true);
 
         // Get tournament
@@ -89,7 +85,15 @@ export default function QRSheetsPage() {
 
         setQrCodes(codes);
         setIsLoading(false);
-    };
+    }, [supabase, tournamentId]);
+
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            void fetchData();
+        }, 0);
+
+        return () => clearTimeout(timer);
+    }, [fetchData]);
 
     const handlePrint = () => {
         window.print();
@@ -168,9 +172,11 @@ export default function QRSheetsPage() {
                             {/* QR Code */}
                             <div className="flex justify-center">
                                 {qrCodes.has(target.id) ? (
-                                    <img
-                                        src={qrCodes.get(target.id)}
+                                    <Image
+                                        src={qrCodes.get(target.id) || ""}
                                         alt={`QR Paca ${target.target_number}`}
+                                        width={192}
+                                        height={192}
                                         className="h-48 w-48"
                                     />
                                 ) : (

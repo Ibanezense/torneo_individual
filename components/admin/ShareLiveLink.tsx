@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
-import { Share2, Check, Copy } from "lucide-react";
+import { Share2, Check } from "lucide-react";
 
 interface ShareLiveLinkProps {
     tournamentId: string;
@@ -23,7 +23,7 @@ export function ShareLiveLink({ tournamentId }: ShareLiveLinkProps) {
                 description: "Compártelo con los espectadores del torneo",
             });
             setTimeout(() => setCopied(false), 2000);
-        } catch (error) {
+        } catch {
             // Fallback for older browsers
             const textArea = document.createElement("textarea");
             textArea.value = liveUrl;

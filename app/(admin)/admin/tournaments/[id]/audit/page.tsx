@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
@@ -23,7 +23,7 @@ import {
     DialogHeader,
     DialogTitle,
 } from "@/components/ui/dialog";
-import { ArrowLeft, Search, Edit3, Save, X, History, AlertTriangle, Check } from "lucide-react";
+import { ArrowLeft, Search, Edit3, Save, X, History, AlertTriangle } from "lucide-react";
 import { CATEGORY_LABELS, GENDER_LABELS } from "@/lib/constants/categories";
 import { FullPageLoader } from "@/components/shared/LoadingSpinner";
 import { toast } from "sonner";
@@ -70,6 +70,27 @@ interface EditingScore {
     newValue: string;
 }
 
+interface AssignmentRow {
+    id: string;
+    archer: {
+        id: string;
+        first_name: string;
+        last_name: string;
+        club: string | null;
+        age_category: AgeCategory;
+        gender: Gender;
+        distance: number;
+    } | {
+        id: string;
+        first_name: string;
+        last_name: string;
+        club: string | null;
+        age_category: AgeCategory;
+        gender: Gender;
+        distance: number;
+    }[] | null;
+}
+
 export default function AuditPage() {
     const params = useParams();
     const tournamentId = params.id as string;
@@ -89,11 +110,7 @@ export default function AuditPage() {
     // Categories available
     const [categories, setCategories] = useState<AgeCategory[]>([]);
 
-    useEffect(() => {
-        fetchData();
-    }, [tournamentId]);
-
-    const fetchData = async () => {
+    const fetchData = useCallback(async () => {
         setIsLoading(true);
 
         // Get tournament
@@ -125,8 +142,9 @@ export default function AuditPage() {
         }
 
         // Get all scores using pagination (Supabase has a hard 1000 row limit)
-        const assignmentIds = assignments.map(a => a.id);
-        let allScores: any[] = [];
+        const assignmentRows = assignments as AssignmentRow[];
+        const assignmentIds = assignmentRows.map((assignment) => assignment.id);
+        let allScores: ScoreRecord[] = [];
         const BATCH_SIZE = 1000;
         let offset = 0;
         let hasMore = true;
@@ -165,8 +183,11 @@ export default function AuditPage() {
         }
 
         // Build archer data
-        const archersData: ArcherWithScores[] = assignments.map(assignment => {
-            const archer = assignment.archer as any;
+        const archersData: ArcherWithScores[] = assignmentRows.flatMap((assignment) => {
+            const archer = Array.isArray(assignment.archer)
+                ? assignment.archer[0]
+                : assignment.archer;
+            if (!archer) return [];
             const scores = scoresByAssignment.get(assignment.id) || [];
 
             const totalScore = scores.reduce((sum, s) => {
@@ -174,7 +195,7 @@ export default function AuditPage() {
                 return sum + (s.score === 11 ? 10 : s.score);
             }, 0);
 
-            return {
+            return [{
                 archerId: archer.id,
                 assignmentId: assignment.id,
                 firstName: archer.first_name,
@@ -186,7 +207,7 @@ export default function AuditPage() {
                 scores,
                 totalScore,
                 arrowsShot: scores.filter(s => s.score !== null).length,
-            };
+            }];
         });
 
         // Sort by name
@@ -197,7 +218,11 @@ export default function AuditPage() {
         setCategories(uniqueCategories);
         setArchers(archersData);
         setIsLoading(false);
-    };
+    }, [supabase, tournamentId]);
+
+    useEffect(() => {
+        void fetchData();
+    }, [fetchData]);
 
     const filteredArchers = archers.filter(a => {
         const matchesSearch = searchTerm === "" ||
@@ -209,7 +234,7 @@ export default function AuditPage() {
         return matchesSearch && matchesCategory;
     });
 
-    const openEditDialog = (score: ScoreRecord, archer: ArcherWithScores) => {
+    const openEditDialog = (score: ScoreRecord) => {
         setEditingScore({
             scoreId: score.id,
             assignmentId: score.assignment_id,
@@ -288,7 +313,7 @@ export default function AuditPage() {
     };
 
     // Group scores by end
-    const groupScoresByEnd = (scores: ScoreRecord[], arrowsPerEnd: number) => {
+    const groupScoresByEnd = (scores: ScoreRecord[]) => {
         const ends = new Map<number, ScoreRecord[]>();
         for (const score of scores) {
             if (!ends.has(score.end_number)) {
@@ -376,7 +401,7 @@ export default function AuditPage() {
                 {filteredArchers.length > 0 ? (
                     <div className="space-y-4">
                         {filteredArchers.map((archer) => {
-                            const endsByNumber = groupScoresByEnd(archer.scores, tournament?.arrows_per_end || 6);
+                            const endsByNumber = groupScoresByEnd(archer.scores);
                             const hasEdits = archer.scores.some(s => s.is_edited);
 
                             return (
@@ -428,7 +453,7 @@ export default function AuditPage() {
                                                                     {arrows.map((arrow) => (
                                                                         <button
                                                                             key={arrow.id}
-                                                                            onClick={() => openEditDialog(arrow, archer)}
+                                                                            onClick={() => openEditDialog(arrow)}
                                                                             className={`
                                                                                 relative w-8 h-8 flex items-center justify-center flex-shrink-0
                                                                                 rounded border text-sm font-bold cursor-pointer

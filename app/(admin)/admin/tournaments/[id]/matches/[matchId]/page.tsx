@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Radio } from "lucide-react";
 import { SetScorer } from "@/components/admin/SetScorer";
 import { FullPageLoader } from "@/components/shared/LoadingSpinner";
 import type { EliminationMatchWithArchers } from "@/types/database";
@@ -19,11 +19,7 @@ export default function MatchScoringPage() {
     const [isLoading, setIsLoading] = useState(true);
     const [match, setMatch] = useState<EliminationMatchWithArchers | null>(null);
 
-    useEffect(() => {
-        fetchMatch();
-    }, [matchId]);
-
-    const fetchMatch = async () => {
+    const fetchMatch = useCallback(async () => {
         const { data, error } = await supabase
             .from("elimination_matches")
             .select(`
@@ -41,7 +37,15 @@ export default function MatchScoringPage() {
             setMatch(data as EliminationMatchWithArchers);
         }
         setIsLoading(false);
-    };
+    }, [matchId, supabase]);
+
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            void fetchMatch();
+        }, 0);
+
+        return () => clearTimeout(timer);
+    }, [fetchMatch]);
 
     if (isLoading) {
         return <FullPageLoader text="Cargando partido..." />;
@@ -61,27 +65,34 @@ export default function MatchScoringPage() {
     }
 
     return (
-        <div className="min-h-screen bg-slate-50 pb-20">
-            {/* Minimal Header */}
-            <div className="bg-white border-b border-slate-200 px-4 py-4 sticky top-0 z-10 shadow-sm">
-                <div className="max-w-md mx-auto flex items-center gap-3">
-                    <Button variant="ghost" size="icon" asChild className="-ml-2">
-                        <Link href={`/admin/tournaments/${tournamentId}/brackets`}>
-                            <ArrowLeft className="h-5 w-5 text-slate-600" />
+        <div className="min-h-screen bg-[#eef2f7] pb-8">
+            <div className="sticky top-0 z-20 bg-[#0f4170] text-white shadow-lg">
+                <div className="mx-auto max-w-3xl px-4 py-3">
+                    <div className="flex items-center justify-between text-sm">
+                        <Link
+                            href={`/admin/tournaments/${tournamentId}/brackets`}
+                            className="inline-flex items-center gap-2 text-white/90 hover:text-white"
+                        >
+                            <ArrowLeft className="h-4 w-4" />
+                            Volver a brackets
                         </Link>
-                    </Button>
-                    <div className="flex-1">
-                        <h1 className="text-base font-bold text-slate-900 leading-none">
-                            Scoring Match #{match.match_position}
+                        <div className="inline-flex items-center gap-1 text-emerald-200">
+                            <Radio className="h-3.5 w-3.5" />
+                            Admin scoring
+                        </div>
+                    </div>
+                    <div className="mt-2">
+                        <h1 className="text-lg font-black leading-none">
+                            Partido #{match.match_position}
                         </h1>
-                        <p className="text-xs text-slate-500 mt-1">
+                        <p className="mt-1 text-xs text-white/70">
                             Ronda {match.round_number}
                         </p>
                     </div>
                 </div>
             </div>
 
-            <div className="max-w-md mx-auto p-4">
+            <div className="mx-auto max-w-3xl p-4">
                 <SetScorer
                     match={match}
                     onMatchUpdate={(updatedMatch) => setMatch(updatedMatch)}

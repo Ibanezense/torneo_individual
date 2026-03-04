@@ -91,7 +91,7 @@ function reorderForBracket(pairs: [number, number][]): [number, number][] {
         }
     }
 
-    return pairs; // Keep original for now, can be refined
+    return result;
 }
 
 /**
@@ -198,31 +198,48 @@ export function generateBracket(
  * Process byes - automatically advance archers with byes
  */
 export function processFirstRoundByes(matches: BracketMatch[]): BracketMatch[] {
-    const firstRoundMatches = matches.filter(m => m.roundNumber === 1);
-    const updatedMatches = [...matches];
+    const updatedMatches = matches.map((match) => ({ ...match }));
+    if (updatedMatches.length === 0) return updatedMatches;
 
-    for (const match of firstRoundMatches) {
-        if (match.isBye) {
-            // Find the round 2 match this winner goes to
-            const nextMatch = updatedMatches.find(
-                m => m.roundNumber === 2 && m.matchPosition === match.nextMatchPosition
-            );
+    const maxRound = Math.max(...updatedMatches.map((match) => match.roundNumber));
+    const matchesByKey = new Map(
+        updatedMatches.map((match) => [`${match.roundNumber}-${match.matchPosition}`, match])
+    );
 
-            if (nextMatch) {
-                const winnerIdForBye = match.archer1Id || match.archer2Id;
-                const winnerSeedForBye = match.archer1Seed || match.archer2Seed;
+    for (let round = 1; round < maxRound; round++) {
+        const roundMatches = updatedMatches
+            .filter((match) => match.roundNumber === round)
+            .sort((a, b) => a.matchPosition - b.matchPosition);
 
-                // Determine if winner goes to archer1 or archer2 slot
-                // Odd match positions fill archer1, even fill archer2
-                if (match.matchPosition % 2 === 1) {
-                    nextMatch.archer1Id = winnerIdForBye;
+        for (const match of roundMatches) {
+            const winnerIdForBye =
+                (match.archer1Id && !match.archer2Id ? match.archer1Id : null) ??
+                (match.archer2Id && !match.archer1Id ? match.archer2Id : null);
+            const winnerSeedForBye =
+                (match.archer1Id && !match.archer2Id ? match.archer1Seed : null) ??
+                (match.archer2Id && !match.archer1Id ? match.archer2Seed : null);
+
+            if (!winnerIdForBye || !match.nextMatchPosition) continue;
+
+            const nextMatch = matchesByKey.get(`${round + 1}-${match.nextMatchPosition}`);
+            if (!nextMatch) continue;
+
+            if (match.matchPosition % 2 === 1) {
+                if (!nextMatch.archer1Id) nextMatch.archer1Id = winnerIdForBye;
+                if (nextMatch.archer1Seed == null && winnerSeedForBye != null) {
                     nextMatch.archer1Seed = winnerSeedForBye;
-                } else {
-                    nextMatch.archer2Id = winnerIdForBye;
+                }
+            } else {
+                if (!nextMatch.archer2Id) nextMatch.archer2Id = winnerIdForBye;
+                if (nextMatch.archer2Seed == null && winnerSeedForBye != null) {
                     nextMatch.archer2Seed = winnerSeedForBye;
                 }
             }
         }
+    }
+
+    for (const match of updatedMatches) {
+        match.isBye = !match.archer1Id || !match.archer2Id;
     }
 
     return updatedMatches;

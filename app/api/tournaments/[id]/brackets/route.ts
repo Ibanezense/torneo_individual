@@ -2,8 +2,36 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { generateBracket, processFirstRoundByes } from "@/lib/utils/brackets";
 import type { AgeCategory, Gender } from "@/types/database";
+import { enforceMutationOrigin } from "@/lib/security/origin";
 
 export const dynamic = "force-dynamic";
+
+interface AssignmentArcherRow {
+    id: string;
+    archer:
+    | {
+        id: string;
+        first_name: string;
+        last_name: string;
+        age_category: AgeCategory;
+        gender: Gender;
+    }
+    | {
+        id: string;
+        first_name: string;
+        last_name: string;
+        age_category: AgeCategory;
+        gender: Gender;
+    }[]
+    | null;
+}
+
+interface QualificationRoundRow {
+    assignment_id: string;
+    round_total: number;
+    ten_plus_x_count: number;
+    x_count: number;
+}
 
 // GET - List brackets for a tournament
 export async function GET(
@@ -20,9 +48,9 @@ export async function GET(
                 *,
                 matches:elimination_matches(
                     *,
-                    archer1:archers!elimination_matches_archer1_id_fkey(id, first_name, last_name, club),
-                    archer2:archers!elimination_matches_archer2_id_fkey(id, first_name, last_name, club),
-                    target:targets(id, target_number)
+                    archer1:archers!elimination_matches_archer1_id_fkey(id, first_name, last_name, club, division),
+                    archer2:archers!elimination_matches_archer2_id_fkey(id, first_name, last_name, club, division),
+                    target:targets(id, target_number, distance)
                 )
             `)
             .eq("tournament_id", tournamentId)
@@ -38,9 +66,10 @@ export async function GET(
         }
 
         return NextResponse.json({ brackets: brackets || [] });
-    } catch (error: any) {
+    } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : "Error interno";
         return NextResponse.json(
-            { error: error.message || "Error interno" },
+            { error: message },
             { status: 500 }
         );
     }
@@ -52,6 +81,9 @@ export async function POST(
     { params }: { params: Promise<{ id: string }> }
 ) {
     try {
+        const forbiddenResponse = enforceMutationOrigin(request);
+        if (forbiddenResponse) return forbiddenResponse;
+
         const { id: tournamentId } = await params;
         const supabase = await createClient();
         const body = await request.json();
@@ -106,8 +138,13 @@ export async function POST(
         }
 
         // Filter by category and gender
-        const filteredAssignments = (assignments || []).filter((a: any) => {
-            const archer = a.archer;
+        const assignmentRows = (assignments || []) as AssignmentArcherRow[];
+        const filteredAssignments = assignmentRows.filter((assignment) => {
+            const archer = Array.isArray(assignment.archer)
+                ? assignment.archer[0]
+                : assignment.archer;
+
+            if (!archer) return false;
             return archer.age_category === category && archer.gender === gender;
         });
 
@@ -118,31 +155,40 @@ export async function POST(
             );
         }
 
-        // Get scores for these assignments
-        const assignmentIds = filteredAssignments.map((a: any) => a.id);
-        const { data: scores } = await supabase
-            .from("qualification_scores")
-            .select("assignment_id, score")
-            .in("assignment_id", assignmentIds)
-            .not("score", "is", null);
+        // Get aggregated qualification rounds to avoid the 1000-row limit on qualification_scores
+        const assignmentIds = filteredAssignments.map((assignment) => assignment.id);
+        const { data: qualificationRounds, error: qualificationRoundsError } = await supabase
+            .from("qualification_rounds")
+            .select("assignment_id, round_total, ten_plus_x_count, x_count")
+            .in("assignment_id", assignmentIds);
+
+        if (qualificationRoundsError) {
+            return NextResponse.json(
+                { error: qualificationRoundsError.message },
+                { status: 500 }
+            );
+        }
 
         // Calculate totals
         const scoresByAssignment = new Map<string, { total: number; tenPlusX: number; x: number }>();
-        for (const score of scores || []) {
-            if (!scoresByAssignment.has(score.assignment_id)) {
-                scoresByAssignment.set(score.assignment_id, { total: 0, tenPlusX: 0, x: 0 });
+        for (const round of (qualificationRounds || []) as QualificationRoundRow[]) {
+            if (!scoresByAssignment.has(round.assignment_id)) {
+                scoresByAssignment.set(round.assignment_id, { total: 0, tenPlusX: 0, x: 0 });
             }
-            const stats = scoresByAssignment.get(score.assignment_id)!;
-            const val = score.score === 11 ? 10 : score.score;
-            stats.total += val;
-            if (score.score === 10 || score.score === 11) stats.tenPlusX++;
-            if (score.score === 11) stats.x++;
+            const stats = scoresByAssignment.get(round.assignment_id)!;
+            stats.total += round.round_total || 0;
+            stats.tenPlusX += round.ten_plus_x_count || 0;
+            stats.x += round.x_count || 0;
         }
 
         // Build ranked archers
-        const rankedArchers = filteredAssignments.map((a: any) => {
-            const archer = a.archer;
-            const stats = scoresByAssignment.get(a.id) || { total: 0, tenPlusX: 0, x: 0 };
+        const rankedArchers = filteredAssignments.flatMap((assignment) => {
+            const archer = Array.isArray(assignment.archer)
+                ? assignment.archer[0]
+                : assignment.archer;
+            if (!archer) return [];
+
+            const stats = scoresByAssignment.get(assignment.id) || { total: 0, tenPlusX: 0, x: 0 };
             return {
                 archerId: archer.id,
                 firstName: archer.first_name,
@@ -212,19 +258,27 @@ export async function POST(
         }
 
         // Insert matches
-        const matchInserts = processedMatches.map((match) => ({
-            bracket_id: newBracket.id,
-            round_number: match.roundNumber,
-            match_position: match.matchPosition,
-            archer1_id: match.archer1Id,
-            archer2_id: match.archer2Id,
-            archer1_seed: match.archer1Seed,
-            archer2_seed: match.archer2Seed,
-            archer1_set_points: 0,
-            archer2_set_points: 0,
-            status: match.isBye ? "completed" : "pending",
-            winner_id: match.isBye ? (match.archer1Id || match.archer2Id) : null,
-        }));
+        const matchInserts = processedMatches.map((match) => {
+            const autoWinnerId =
+                (match.archer1Id && !match.archer2Id ? match.archer1Id : null) ??
+                (match.archer2Id && !match.archer1Id ? match.archer2Id : null);
+            const hasAnyArcher = Boolean(match.archer1Id || match.archer2Id);
+            const isClosedMatch = !hasAnyArcher || Boolean(autoWinnerId);
+
+            return {
+                bracket_id: newBracket.id,
+                round_number: match.roundNumber,
+                match_position: match.matchPosition,
+                archer1_id: match.archer1Id,
+                archer2_id: match.archer2Id,
+                archer1_seed: match.archer1Seed,
+                archer2_seed: match.archer2Seed,
+                archer1_set_points: 0,
+                archer2_set_points: 0,
+                status: isClosedMatch ? "completed" : "pending",
+                winner_id: autoWinnerId,
+            };
+        });
 
         const { error: matchesError } = await supabase
             .from("elimination_matches")
@@ -243,10 +297,11 @@ export async function POST(
             matchCount: matchInserts.length,
             archerCount: archersForBracket.length,
         });
-    } catch (error: any) {
+    } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : "Error interno";
         console.error("Error generating brackets:", error);
         return NextResponse.json(
-            { error: error.message || "Error interno" },
+            { error: message },
             { status: 500 }
         );
     }

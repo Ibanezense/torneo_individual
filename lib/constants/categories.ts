@@ -1,23 +1,46 @@
 // Age categories and distances
 
-import type { AgeCategory, Gender } from "@/types/database";
+import type { AgeCategory, Gender, TournamentDivision } from "@/types/database";
+
+export const AGE_CATEGORY_OPTIONS: AgeCategory[] = [
+    "u10",
+    "u13",
+    "u15",
+    "u18",
+    "u21",
+    "senior",
+    "master",
+    "open",
+];
+
+export const TOURNAMENT_DIVISION_OPTIONS: TournamentDivision[] = [
+    "recurvo",
+    "compuesto",
+    "barebow",
+];
 
 // Category labels for display
 export const CATEGORY_LABELS: Record<AgeCategory, string> = {
-    u10: "Sub 10",
-    u13: "Sub 13",
-    u15: "Sub 15",
-    u18: "Sub 18",
-    u21: "Sub 21",
+    u10: "U10",
+    u13: "U13",
+    u15: "U15",
+    u18: "U18",
+    u21: "U21",
     senior: "Mayores",
     master: "Senior",
-    open: "Abierto",
+    open: "Open",
 };
 
 // Gender labels
 export const GENDER_LABELS: Record<Gender, string> = {
-    male: "Masculino",
-    female: "Femenino",
+    male: "Varones",
+    female: "Damas",
+};
+
+export const DIVISION_LABELS: Record<TournamentDivision, string> = {
+    recurvo: "Recurvo",
+    compuesto: "Compuesto",
+    barebow: "Barebow",
 };
 
 // Distances by category (in meters) for outdoor tournaments

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { Target, AssignmentStatus } from "@/types/database";
 
@@ -20,6 +20,22 @@ interface Assignment {
     };
 }
 
+interface RawAssignmentRow {
+    id: string;
+    target_id: string;
+    is_finished: boolean;
+    archer:
+    | {
+        first_name: string;
+        last_name: string;
+    }
+    | {
+        first_name: string;
+        last_name: string;
+    }[]
+    | null;
+}
+
 interface TargetStats {
     inactive: number;
     scoring: number;
@@ -31,7 +47,7 @@ export function useRealtimeTargets(tournamentId: string) {
     const [targets, setTargets] = useState<TargetWithStatus[]>([]);
     const [isConnected, setIsConnected] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
-    const supabase = createClient();
+    const supabase = useMemo(() => createClient(), []);
 
     const fetchTargets = useCallback(async () => {
         // 1. Get all targets for this tournament
@@ -67,9 +83,10 @@ export function useRealtimeTargets(tournamentId: string) {
         const totalArrows = tournament?.qualification_arrows || 36;
 
         // 4. Get scores count per assignment
-        const assignmentIds = (assignmentsData || []).map((a: any) => a.id);
+        const rawAssignments = (assignmentsData || []) as RawAssignmentRow[];
+        const assignmentIds = rawAssignments.map((assignment) => assignment.id);
 
-        let scoresByAssignment = new Map<string, number>();
+        const scoresByAssignment = new Map<string, number>();
         if (assignmentIds.length > 0) {
             const { data: scoresData } = await supabase
                 .from("qualification_scores")
@@ -86,7 +103,7 @@ export function useRealtimeTargets(tournamentId: string) {
 
         // 5. Group assignments by target and calculate status
         const assignmentsByTarget = new Map<string, Assignment[]>();
-        for (const assignment of assignmentsData || []) {
+        for (const assignment of rawAssignments) {
             if (!assignmentsByTarget.has(assignment.target_id)) {
                 assignmentsByTarget.set(assignment.target_id, []);
             }
@@ -100,8 +117,12 @@ export function useRealtimeTargets(tournamentId: string) {
             });
         }
 
-        // 6. Calculate target statuses
-        const targetsWithCounts: TargetWithStatus[] = (targetsData || []).map((target: Target) => {
+        const qualificationTargetIds = new Set(assignmentsByTarget.keys());
+
+        // 6. Calculate target statuses only for qualification targets with assignments
+        const targetsWithCounts: TargetWithStatus[] = (targetsData || [])
+            .filter((target: Target) => qualificationTargetIds.has(target.id))
+            .map((target: Target) => {
             const assignments = assignmentsByTarget.get(target.id) || [];
             const archerCount = assignments.length;
 
@@ -134,14 +155,16 @@ export function useRealtimeTargets(tournamentId: string) {
                 scoringCount,
                 completedCount,
             };
-        });
+            });
 
         setTargets(targetsWithCounts);
         setIsLoading(false);
     }, [tournamentId, supabase]);
 
     useEffect(() => {
-        fetchTargets();
+        const initialTimer = setTimeout(() => {
+            void fetchTargets();
+        }, 0);
 
         // Subscribe to realtime changes on scores
         const channel = supabase
@@ -171,11 +194,12 @@ export function useRealtimeTargets(tournamentId: string) {
                     fetchTargets();
                 }
             )
-            .subscribe((status) => {
+            .subscribe((status: string) => {
                 setIsConnected(status === "SUBSCRIBED");
             });
 
         return () => {
+            clearTimeout(initialTimer);
             supabase.removeChannel(channel);
         };
     }, [tournamentId, supabase, fetchTargets]);

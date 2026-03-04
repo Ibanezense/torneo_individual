@@ -1,13 +1,14 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Loader2, ArrowLeft, Trophy, Target, Ruler } from "lucide-react";
+import { Loader2, ArrowLeft, Trophy, Target, Ruler, Eraser } from "lucide-react";
 import { toast } from "sonner";
+import { resolvePendingByeAdvances } from "@/lib/utils/elimination-advancement";
 
 interface MatchData {
     id: string;
@@ -32,6 +33,28 @@ interface MatchData {
 
 type Phase = "arrows" | "distance" | "complete";
 
+const KEYPAD_COLORS: Record<string, string> = {
+    "X": "bg-[#FFE55C] text-black border-[#E6CE45]",
+    "10": "bg-[#FFE55C] text-black border-[#E6CE45]",
+    "9": "bg-[#FFE55C] text-black border-[#E6CE45]",
+    "8": "bg-[#FF5C5C] text-white border-[#E64545]",
+    "7": "bg-[#FF5C5C] text-white border-[#E64545]",
+    "6": "bg-[#5C9DFF] text-white border-[#4589E6]",
+    "5": "bg-[#5C9DFF] text-white border-[#4589E6]",
+    "4": "bg-slate-900 text-white border-black",
+    "3": "bg-slate-900 text-white border-black",
+    "2": "bg-slate-200 text-black border-slate-300",
+    "1": "bg-slate-200 text-black border-slate-300",
+    "M": "bg-slate-200 text-slate-500 border-slate-300",
+};
+
+const KEYPAD_LAYOUT = [
+    ["X", "10", "9"],
+    ["8", "7", "6"],
+    ["5", "4", "3"],
+    ["2", "1", "M"],
+];
+
 export default function ShootoffPage() {
     const params = useParams();
     const router = useRouter();
@@ -55,11 +78,7 @@ export default function ShootoffPage() {
     // Winner
     const [winnerId, setWinnerId] = useState<string | null>(null);
 
-    useEffect(() => {
-        fetchData();
-    }, [targetId]);
-
-    const fetchData = async () => {
+    const fetchData = useCallback(async () => {
         setIsLoading(true);
 
         const { data: matchData, error } = await supabase
@@ -103,7 +122,11 @@ export default function ShootoffPage() {
         }
 
         setIsLoading(false);
-    };
+    }, [supabase, targetId]);
+
+    useEffect(() => {
+        void fetchData();
+    }, [fetchData]);
 
     const handleArrowPress = (value: number) => {
         if (activeArcher === 1) {
@@ -111,6 +134,21 @@ export default function ShootoffPage() {
             setActiveArcher(2);
         } else {
             setArcher2Arrow(value);
+        }
+    };
+
+    const handleDeleteArrow = () => {
+        if (activeArcher === 2 && archer2Arrow !== null) {
+            setArcher2Arrow(null);
+            return;
+        }
+
+        if (activeArcher === 2 && archer2Arrow === null) {
+            setActiveArcher(1);
+        }
+
+        if (activeArcher === 1 && archer1Arrow !== null) {
+            setArcher1Arrow(null);
         }
     };
 
@@ -145,8 +183,9 @@ export default function ShootoffPage() {
                 setPhase("distance");
                 toast.info("Empate - Se requiere medición de distancia al centro");
             }
-        } catch (error: any) {
-            toast.error("Error", { description: error.message });
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : "Error interno";
+            toast.error("Error", { description: message });
         } finally {
             setIsSaving(false);
         }
@@ -204,8 +243,9 @@ export default function ShootoffPage() {
             });
 
             router.push(`/scoring/elimination/target/${targetId}`);
-        } catch (error: any) {
-            toast.error("Error", { description: error.message });
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : "Error interno";
+            toast.error("Error", { description: message });
         } finally {
             setIsSaving(false);
         }
@@ -250,31 +290,33 @@ export default function ShootoffPage() {
             .eq("id", completedMatch.bracket.id)
             .single();
 
-        if (bracket) {
-            const totalRounds = Math.log2(bracket.bracket_size);
-            const semifinalRound = totalRounds - 1;
+        if (!bracket) return;
 
-            if (completedMatch.round_number === semifinalRound) {
-                const { data: bronzeMatch } = await supabase
+        const totalRounds = Math.log2(bracket.bracket_size);
+        const semifinalRound = totalRounds - 1;
+
+        if (completedMatch.round_number === semifinalRound && loserId) {
+            const { data: bronzeMatch } = await supabase
+                .from("elimination_matches")
+                .select("id, archer1_id, archer2_id")
+                .eq("bracket_id", completedMatch.bracket.id)
+                .eq("round_number", 0)
+                .single();
+
+            if (bronzeMatch) {
+                const isFirstSemifinal = completedMatch.match_position === 1;
+                const bronzeUpdate = isFirstSemifinal
+                    ? { archer1_id: loserId }
+                    : { archer2_id: loserId };
+
+                await supabase
                     .from("elimination_matches")
-                    .select("id, archer1_id, archer2_id")
-                    .eq("bracket_id", completedMatch.bracket.id)
-                    .eq("round_number", 0)
-                    .single();
-
-                if (bronzeMatch) {
-                    const isFirstSemifinal = completedMatch.match_position === 1;
-                    const bronzeUpdate = isFirstSemifinal
-                        ? { archer1_id: loserId }
-                        : { archer2_id: loserId };
-
-                    await supabase
-                        .from("elimination_matches")
-                        .update(bronzeUpdate)
-                        .eq("id", bronzeMatch.id);
-                }
+                    .update(bronzeUpdate)
+                    .eq("id", bronzeMatch.id);
             }
         }
+
+        await resolvePendingByeAdvances(supabase, completedMatch.bracket.id, bracket.bracket_size);
     };
 
     const handleBack = () => router.push(`/scoring/elimination/target/${targetId}`);
@@ -502,33 +544,43 @@ export default function ShootoffPage() {
             {/* Keypad for arrows phase */}
             {phase === "arrows" && (
                 <>
-                    <div className="bg-white p-3 border-t border-slate-200">
-                        <div className="grid grid-cols-6 gap-2 mb-2">
-                            <button onClick={() => handleArrowPress(11)} className="h-12 rounded-lg font-bold text-lg bg-yellow-400 text-black">X</button>
-                            <button onClick={() => handleArrowPress(10)} className="h-12 rounded-lg font-bold text-lg bg-yellow-400 text-black">10</button>
-                            <button onClick={() => handleArrowPress(9)} className="h-12 rounded-lg font-bold text-lg bg-yellow-400 text-black">9</button>
-                            <button onClick={() => handleArrowPress(8)} className="h-12 rounded-lg font-bold text-lg bg-red-500 text-white">8</button>
-                            <button onClick={() => handleArrowPress(7)} className="h-12 rounded-lg font-bold text-lg bg-red-500 text-white">7</button>
-                            <button onClick={() => handleArrowPress(6)} className="h-12 rounded-lg font-bold text-lg bg-blue-500 text-white">6</button>
-                        </div>
-                        <div className="grid grid-cols-6 gap-2">
-                            <button onClick={() => handleArrowPress(5)} className="h-12 rounded-lg font-bold text-lg bg-blue-500 text-white">5</button>
-                            <button onClick={() => handleArrowPress(4)} className="h-12 rounded-lg font-bold text-lg bg-gray-800 text-white">4</button>
-                            <button onClick={() => handleArrowPress(3)} className="h-12 rounded-lg font-bold text-lg bg-gray-800 text-white">3</button>
-                            <button onClick={() => handleArrowPress(2)} className="h-12 rounded-lg font-bold text-lg bg-slate-100 border-2 border-slate-300 text-slate-700">2</button>
-                            <button onClick={() => handleArrowPress(1)} className="h-12 rounded-lg font-bold text-lg bg-slate-100 border-2 border-slate-300 text-slate-700">1</button>
-                            <button onClick={() => handleArrowPress(0)} className="h-12 rounded-lg font-bold text-lg bg-green-600 text-white">M</button>
-                        </div>
-                    </div>
+                    <div className="bg-white border-t border-slate-200">
+                        <div className="p-2 pb-safe">
+                            <div className="grid grid-cols-3 gap-2 max-w-md mx-auto">
+                                {KEYPAD_LAYOUT.flat().map((key) => (
+                                    <button
+                                        key={key}
+                                        onClick={() => handleArrowPress(key === "X" ? 11 : key === "M" ? 0 : parseInt(key, 10))}
+                                        className={`
+                                            h-14 rounded-lg text-2xl font-bold shadow-sm active:scale-95 transition-transform border-b-4
+                                            ${KEYPAD_COLORS[key]}
+                                        `}
+                                    >
+                                        {key}
+                                    </button>
+                                ))}
+                            </div>
 
-                    <div className="bg-white p-3 border-t border-slate-200 pb-safe">
-                        <Button
-                            onClick={handleCompareArrows}
-                            disabled={archer1Arrow === null || archer2Arrow === null || isSaving}
-                            className="w-full bg-amber-600 hover:bg-amber-700 disabled:opacity-50"
-                        >
-                            {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Comparar Flechas"}
-                        </Button>
+                            <div className="grid grid-cols-2 gap-2 max-w-md mx-auto mt-3">
+                                <Button
+                                    onClick={handleDeleteArrow}
+                                    variant="outline"
+                                    className="h-12 border-slate-300 text-slate-600 hover:bg-slate-100"
+                                >
+                                    <Eraser className="w-5 h-5 mr-2" />
+                                    Borrar Flecha
+                                </Button>
+
+                                <Button
+                                    onClick={handleCompareArrows}
+                                    disabled={archer1Arrow === null || archer2Arrow === null || isSaving}
+                                    className="h-12 text-lg font-bold bg-amber-600 hover:bg-amber-700 shadow-md shadow-amber-900/20 disabled:opacity-50"
+                                >
+                                    {isSaving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+                                    Comparar Flechas
+                                </Button>
+                            </div>
+                        </div>
                     </div>
                 </>
             )}
