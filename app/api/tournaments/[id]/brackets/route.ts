@@ -263,7 +263,8 @@ export async function POST(
                 (match.archer1Id && !match.archer2Id ? match.archer1Id : null) ??
                 (match.archer2Id && !match.archer1Id ? match.archer2Id : null);
             const hasAnyArcher = Boolean(match.archer1Id || match.archer2Id);
-            const isClosedMatch = !hasAnyArcher || Boolean(autoWinnerId);
+            const isRoundOne = match.roundNumber === 1;
+            const isClosedMatch = !hasAnyArcher || (isRoundOne && Boolean(autoWinnerId));
 
             return {
                 bracket_id: newBracket.id,
@@ -276,7 +277,7 @@ export async function POST(
                 archer1_set_points: 0,
                 archer2_set_points: 0,
                 status: isClosedMatch ? "completed" : "pending",
-                winner_id: autoWinnerId,
+                winner_id: isClosedMatch ? autoWinnerId : null,
             };
         });
 
