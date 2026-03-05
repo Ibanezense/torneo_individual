@@ -562,8 +562,9 @@ function MatchCard({ match, tournamentId }: MatchCardProps) {
         }
     };
 
-    const isArcher1Winner = Boolean(match.archer1_id) && match.winner_id === match.archer1_id;
-    const isArcher2Winner = Boolean(match.archer2_id) && match.winner_id === match.archer2_id;
+    const hasConfirmedWinner = match.status === "completed" && Boolean(match.winner_id);
+    const isArcher1Winner = hasConfirmedWinner && Boolean(match.archer1_id) && match.winner_id === match.archer1_id;
+    const isArcher2Winner = hasConfirmedWinner && Boolean(match.archer2_id) && match.winner_id === match.archer2_id;
     const isBye = !match.archer1_id || !match.archer2_id;
 
     return (

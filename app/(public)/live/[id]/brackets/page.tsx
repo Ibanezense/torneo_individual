@@ -224,8 +224,9 @@ export default function LiveBracketsPage() {
                                 <CardContent className="p-0">
                                     <div className="divide-y divide-slate-100">
                                         {matches.map((match) => {
-                                            const isArcher1Winner = Boolean(match.archer1_id) && match.winner_id === match.archer1_id;
-                                            const isArcher2Winner = Boolean(match.archer2_id) && match.winner_id === match.archer2_id;
+                                            const hasConfirmedWinner = match.status === "completed" && Boolean(match.winner_id);
+                                            const isArcher1Winner = hasConfirmedWinner && Boolean(match.archer1_id) && match.winner_id === match.archer1_id;
+                                            const isArcher2Winner = hasConfirmedWinner && Boolean(match.archer2_id) && match.winner_id === match.archer2_id;
 
                                             return (
                                                 <div key={match.id} className="p-3">

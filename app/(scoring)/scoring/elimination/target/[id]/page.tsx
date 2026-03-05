@@ -102,6 +102,7 @@ export default function EliminationTargetHubPage() {
     const [targetData, setTargetData] = useState<TargetData | null>(null);
     const [currentMatch, setCurrentMatch] = useState<MatchData | null>(null);
     const [matchSets, setMatchSets] = useState<MatchSetData[]>([]);
+    const hasConfirmedWinner = currentMatch?.status === "completed" && Boolean(currentMatch?.winner_id);
 
     const fetchData = useCallback(async () => {
         setIsLoading(true);
@@ -276,8 +277,8 @@ export default function EliminationTargetHubPage() {
                                         </div>
                                     </div>
                                     <div className="mt-3 flex items-center justify-center gap-2">
-                                        {currentMatch.winner_id === currentMatch.archer1_id && <div className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-700"><Trophy className="h-3.5 w-3.5" />Gano {currentMatch.archer1?.first_name}</div>}
-                                        {currentMatch.winner_id === currentMatch.archer2_id && <div className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-700"><Trophy className="h-3.5 w-3.5" />Gano {currentMatch.archer2?.first_name}</div>}
+                                        {hasConfirmedWinner && currentMatch.winner_id === currentMatch.archer1_id && <div className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-700"><Trophy className="h-3.5 w-3.5" />Gano {currentMatch.archer1?.first_name}</div>}
+                                        {hasConfirmedWinner && currentMatch.winner_id === currentMatch.archer2_id && <div className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-700"><Trophy className="h-3.5 w-3.5" />Gano {currentMatch.archer2?.first_name}</div>}
                                         {currentMatch.status === "shootoff" && <div className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-700"><Target className="h-3.5 w-3.5" />Shoot-off</div>}
                                         {currentMatch.status === "in_progress" && <div className="inline-flex items-center gap-1 rounded-full bg-sky-100 px-3 py-1 text-xs font-bold text-sky-700"><CheckCircle2 className="h-3.5 w-3.5" />En juego</div>}
                                     </div>
