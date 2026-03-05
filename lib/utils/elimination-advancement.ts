@@ -87,6 +87,32 @@ export async function resolvePendingByeAdvances(
 
                 if (reopenError) throw new Error(reopenError.message);
                 changed = true;
+
+                if (match.round_number < totalRounds) {
+                    const nextRound = match.round_number + 1;
+                    const nextMatchPosition = Math.ceil(match.match_position / 2);
+                    const isOddPosition = match.match_position % 2 === 1;
+                    const nextMatch = matchByKey.get(`${nextRound}-${nextMatchPosition}`);
+
+                    if (nextMatch) {
+                        const updateNextData: Record<string, string | number | null> = isOddPosition
+                            ? { archer1_id: null, archer1_seed: null }
+                            : { archer2_id: null, archer2_seed: null };
+
+                        updateNextData.status = "pending";
+                        updateNextData.winner_id = null;
+                        updateNextData.archer1_set_points = 0;
+                        updateNextData.archer2_set_points = 0;
+
+                        const { error: clearNextError } = await supabase
+                            .from("elimination_matches")
+                            .update(updateNextData)
+                            .eq("id", nextMatch.id);
+
+                        if (clearNextError) throw new Error(clearNextError.message);
+                        changed = true;
+                    }
+                }
                 continue;
             }
 
@@ -103,11 +129,39 @@ export async function resolvePendingByeAdvances(
                     .update({
                         status: "pending",
                         winner_id: null,
+                        archer1_set_points: 0,
+                        archer2_set_points: 0,
                     })
                     .eq("id", match.id);
 
                 if (reopenError) throw new Error(reopenError.message);
                 changed = true;
+
+                if (match.round_number < totalRounds) {
+                    const nextRound = match.round_number + 1;
+                    const nextMatchPosition = Math.ceil(match.match_position / 2);
+                    const isOddPosition = match.match_position % 2 === 1;
+                    const nextMatch = matchByKey.get(`${nextRound}-${nextMatchPosition}`);
+
+                    if (nextMatch) {
+                        const updateNextData: Record<string, string | number | null> = isOddPosition
+                            ? { archer1_id: null, archer1_seed: null }
+                            : { archer2_id: null, archer2_seed: null };
+
+                        updateNextData.status = "pending";
+                        updateNextData.winner_id = null;
+                        updateNextData.archer1_set_points = 0;
+                        updateNextData.archer2_set_points = 0;
+
+                        const { error: clearNextError } = await supabase
+                            .from("elimination_matches")
+                            .update(updateNextData)
+                            .eq("id", nextMatch.id);
+
+                        if (clearNextError) throw new Error(clearNextError.message);
+                        changed = true;
+                    }
+                }
                 continue;
             }
 
