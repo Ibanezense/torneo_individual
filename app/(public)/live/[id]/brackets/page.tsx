@@ -227,6 +227,8 @@ export default function LiveBracketsPage() {
                                             const hasConfirmedWinner = match.status === "completed" && Boolean(match.winner_id);
                                             const isArcher1Winner = hasConfirmedWinner && Boolean(match.archer1_id) && match.winner_id === match.archer1_id;
                                             const isArcher2Winner = hasConfirmedWinner && Boolean(match.archer2_id) && match.winner_id === match.archer2_id;
+                                            const hasSingleArcher = Boolean(match.archer1_id) !== Boolean(match.archer2_id);
+                                            const isResolvedBye = hasSingleArcher && hasConfirmedWinner;
 
                                             return (
                                                 <div key={match.id} className="p-3">
@@ -253,7 +255,7 @@ export default function LiveBracketsPage() {
                                                                         </div>
                                                                     </div>
                                                                 ) : (
-                                                                    <span className="text-slate-400 italic text-sm">BYE</span>
+                                                                    <span className="text-slate-400 italic text-sm">{isResolvedBye ? "BYE" : "Pendiente"}</span>
                                                                 )}
                                                             </div>
 
@@ -289,7 +291,7 @@ export default function LiveBracketsPage() {
                                                                         </div>
                                                                     </div>
                                                                 ) : (
-                                                                    <span className="text-slate-400 italic text-sm">BYE</span>
+                                                                    <span className="text-slate-400 italic text-sm">{isResolvedBye ? "BYE" : "Pendiente"}</span>
                                                                 )}
                                                                 {isArcher2Winner && <Trophy className="h-4 w-4 text-yellow-500 flex-shrink-0" />}
                                                             </div>

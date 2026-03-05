@@ -574,14 +574,16 @@ function MatchCard({ match, tournamentId }: MatchCardProps) {
     const hasConfirmedWinner = match.status === "completed" && Boolean(match.winner_id);
     const isArcher1Winner = hasConfirmedWinner && Boolean(match.archer1_id) && match.winner_id === match.archer1_id;
     const isArcher2Winner = hasConfirmedWinner && Boolean(match.archer2_id) && match.winner_id === match.archer2_id;
-    const isBye = !match.archer1_id || !match.archer2_id;
+    const hasSingleArcher = Boolean(match.archer1_id) !== Boolean(match.archer2_id);
+    const isResolvedBye = hasSingleArcher && hasConfirmedWinner;
+    const isUnavailableMatch = !match.archer1_id || !match.archer2_id;
 
     return (
         <Link
-            href={!isBye ? `/admin/tournaments/${tournamentId}/matches/${match.id}` : '#'}
+            href={!isUnavailableMatch ? `/admin/tournaments/${tournamentId}/matches/${match.id}` : '#'}
             className={cn(
                 "block rounded-2xl border border-slate-200 bg-white p-3 transition-colors hover:border-slate-300 hover:bg-slate-50 active:bg-slate-100",
-                isBye && "cursor-default hover:border-slate-200 hover:bg-white active:bg-white"
+                isUnavailableMatch && "cursor-default hover:border-slate-200 hover:bg-white active:bg-white"
             )}
         >
             <div className="space-y-3">
@@ -598,7 +600,7 @@ function MatchCard({ match, tournamentId }: MatchCardProps) {
                     </div>
                     <div className="flex items-center gap-2">
                         <div className={`h-2.5 w-2.5 rounded-full ${getStatusColor(match.status)}`} />
-                        {!isBye && <ChevronRight className="h-4 w-4 text-slate-300" />}
+                        {!isUnavailableMatch && <ChevronRight className="h-4 w-4 text-slate-300" />}
                     </div>
                 </div>
 
@@ -611,7 +613,9 @@ function MatchCard({ match, tournamentId }: MatchCardProps) {
                             {match.archer1_seed ? `#${match.archer1_seed}` : "-"}
                         </span>
                         <span className={cn("truncate text-sm font-semibold", isArcher1Winner ? "text-emerald-700" : "text-slate-700")}>
-                            {match.archer1 ? `${match.archer1.last_name}, ${match.archer1.first_name}` : "BYE"}
+                            {match.archer1
+                                ? `${match.archer1.last_name}, ${match.archer1.first_name}`
+                                : (isResolvedBye ? "BYE" : "Pendiente")}
                         </span>
                         <span className={cn("text-lg font-black", isArcher1Winner ? "text-emerald-700" : "text-slate-600")}>
                             {match.archer1_set_points}
@@ -627,7 +631,9 @@ function MatchCard({ match, tournamentId }: MatchCardProps) {
                             {match.archer2_seed ? `#${match.archer2_seed}` : "-"}
                         </span>
                         <span className={cn("truncate text-sm font-semibold", isArcher2Winner ? "text-emerald-700" : "text-slate-700")}>
-                            {match.archer2 ? `${match.archer2.last_name}, ${match.archer2.first_name}` : "BYE"}
+                            {match.archer2
+                                ? `${match.archer2.last_name}, ${match.archer2.first_name}`
+                                : (isResolvedBye ? "BYE" : "Pendiente")}
                         </span>
                         <span className={cn("text-lg font-black", isArcher2Winner ? "text-emerald-700" : "text-slate-600")}>
                             {match.archer2_set_points}
@@ -641,7 +647,7 @@ function MatchCard({ match, tournamentId }: MatchCardProps) {
                         Shoot-off
                     </div>
                 )}
-                {isBye && (
+                {isResolvedBye && (
                     <div className="rounded-lg bg-slate-50 px-3 py-2 text-center text-xs font-bold uppercase tracking-wide text-slate-400">
                         Pase por Bye
                     </div>

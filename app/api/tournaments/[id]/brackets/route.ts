@@ -262,9 +262,8 @@ export async function POST(
             const autoWinnerId =
                 (match.archer1Id && !match.archer2Id ? match.archer1Id : null) ??
                 (match.archer2Id && !match.archer1Id ? match.archer2Id : null);
-            const hasAnyArcher = Boolean(match.archer1Id || match.archer2Id);
             const isRoundOne = match.roundNumber === 1;
-            const isClosedMatch = !hasAnyArcher || (isRoundOne && Boolean(autoWinnerId));
+            const isClosedMatch = isRoundOne && Boolean(autoWinnerId);
 
             return {
                 bracket_id: newBracket.id,

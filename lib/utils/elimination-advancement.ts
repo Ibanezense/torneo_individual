@@ -70,6 +70,27 @@ export async function resolvePendingByeAdvances(
             .sort((a, b) => a.round_number - b.round_number || a.match_position - b.match_position);
 
         for (const match of orderedMatches) {
+            const completedWithoutWinnerButAssigned =
+                match.status === "completed" &&
+                !match.winner_id &&
+                Boolean(match.archer1_id || match.archer2_id);
+
+            if (completedWithoutWinnerButAssigned) {
+                const { error: reopenError } = await supabase
+                    .from("elimination_matches")
+                    .update({
+                        status: "pending",
+                        winner_id: null,
+                        archer1_set_points: 0,
+                        archer2_set_points: 0,
+                    })
+                    .eq("id", match.id);
+
+                if (reopenError) throw new Error(reopenError.message);
+                changed = true;
+                continue;
+            }
+
             const hasBothArchers = Boolean(match.archer1_id && match.archer2_id);
             const staleCompletedAutoMatch = hasBothArchers &&
                 match.status === "completed" &&
