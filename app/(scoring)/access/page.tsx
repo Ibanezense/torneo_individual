@@ -87,13 +87,22 @@ export default function AccessPage() {
                 if (activeTargets.length === 1) {
                     const targetId = activeTargets[0].id;
                     const tournamentStatus = getTournamentStatus(activeTargets[0]);
+                    const { count: assignmentCount, error: assignmentsError } = await supabase
+                        .from("assignments")
+                        .select("id", { count: "exact", head: true })
+                        .eq("target_id", targetId);
 
-                    // Route based on tournament phase
-                    if (tournamentStatus === "elimination") {
-                        router.push(`/scoring/elimination/target/${targetId}`);
-                    } else {
-                        router.push(`/scoring/target/${targetId}`);
-                    }
+                    if (assignmentsError) throw assignmentsError;
+
+                    const hasQualificationAssignments = (assignmentCount || 0) > 0;
+                    const shouldUseElimination =
+                        tournamentStatus === "elimination" || !hasQualificationAssignments;
+
+                    router.push(
+                        shouldUseElimination
+                            ? `/scoring/elimination/target/${targetId}`
+                            : `/scoring/target/${targetId}`
+                    );
                     return;
                 }
 

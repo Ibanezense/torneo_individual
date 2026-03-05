@@ -26,6 +26,7 @@ interface TargetWithArchers {
     id: string;
     target_number: number;
     distance: number;
+    hasEliminationMatch: boolean;
     archers: {
         position: string;
         archerName: string;
@@ -47,6 +48,10 @@ interface TargetAssignmentsRow {
     target_number: number;
     distance: number;
     assignments: AssignmentArcherRow[] | null;
+}
+
+interface EliminationTargetRow {
+    target_id: string | null;
 }
 
 export default function AccessCodesPage() {
@@ -90,10 +95,25 @@ export default function AccessCodesPage() {
             .eq("tournament_id", tournamentId)
             .order("target_number");
 
+        const targetIds = ((targetsData || []) as TargetAssignmentsRow[]).map((target) => target.id);
+        const { data: eliminationMatches } = targetIds.length
+            ? await supabase
+                .from("elimination_matches")
+                .select("target_id")
+                .in("target_id", targetIds)
+            : { data: [] };
+
+        const eliminationTargetIds = new Set(
+            ((eliminationMatches || []) as EliminationTargetRow[])
+                .map((match) => match.target_id)
+                .filter((targetId): targetId is string => Boolean(targetId))
+        );
+
         const targetsWithArchers: TargetWithArchers[] = ((targetsData || []) as TargetAssignmentsRow[]).map((target) => ({
             id: target.id,
             target_number: target.target_number,
             distance: target.distance,
+            hasEliminationMatch: eliminationTargetIds.has(target.id),
             archers: (target.assignments || [])
                 .sort((left, right) => left.position.localeCompare(right.position))
                 .map((assignment) => ({
@@ -153,7 +173,10 @@ export default function AccessCodesPage() {
     );
 
     const displayedTargets = useMemo(
-        () => (showUnusedTargets ? targets : targets.filter((target) => target.archers.length > 0)),
+        () =>
+            showUnusedTargets
+                ? targets
+                : targets.filter((target) => target.archers.length > 0 || target.hasEliminationMatch),
         [showUnusedTargets, targets]
     );
 
@@ -263,11 +286,12 @@ export default function AccessCodesPage() {
                 {displayedTargets.map((target) => {
                     const code = `T${target.target_number}`;
                     const hasArchers = target.archers.length > 0;
+                    const hasContent = hasArchers || target.hasEliminationMatch;
 
                     return (
                         <Card
                             key={target.id}
-                            className={`border-2 ${hasArchers ? "border-slate-200" : "border-dashed border-slate-300 opacity-60"}`}
+                            className={`border-2 ${hasContent ? "border-slate-200" : "border-dashed border-slate-300 opacity-60"}`}
                         >
                             <CardHeader className="pb-3">
                                 <div className="flex items-center justify-between">
@@ -321,6 +345,8 @@ export default function AccessCodesPage() {
                                             ))}
                                         </div>
                                     </div>
+                                ) : target.hasEliminationMatch ? (
+                                    <p className="text-sm text-slate-600 font-medium">Partido de eliminatoria asignado</p>
                                 ) : (
                                     <p className="text-sm text-slate-400 italic">Sin arqueros asignados</p>
                                 )}
