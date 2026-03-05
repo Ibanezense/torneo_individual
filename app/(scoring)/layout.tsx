@@ -11,7 +11,7 @@ export default function ScoringLayout({
         <div className="flex min-h-screen flex-col bg-background">
             {/* Simple header */}
             <header className="flex h-14 items-center justify-center border-b bg-card px-4">
-                <Link href="/" className="flex items-center gap-2">
+                <Link href="/access" className="flex items-center gap-2">
                     <Target className="h-6 w-6 text-primary" />
                     <span className="font-bold">Archery Manager</span>
                 </Link>

@@ -145,7 +145,7 @@ export default function AccessCodesPage() {
         setIsNormalizing(false);
     };
 
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL || (typeof window !== "undefined" ? window.location.origin : "");
+    const accessUrl = "https://torneo-individual.vercel.app/access";
 
     const unusedTargetsCount = useMemo(
         () => targets.filter((target) => target.archers.length === 0).length,
@@ -242,7 +242,7 @@ export default function AccessCodesPage() {
                         <div className="space-y-2">
                             <h3 className="font-semibold text-blue-900">¿Cómo usan los arqueros su código?</h3>
                             <ol className="text-sm text-blue-700 space-y-1">
-                                <li>1. El arquero abre <strong className="text-blue-900">{appUrl}/access</strong> en su celular</li>
+                                <li>1. El arquero abre <strong className="text-blue-900">{accessUrl}</strong> en su celular</li>
                                 <li>2. Ingresa el código de la paca (ej: <strong>T1</strong>, <strong>T2</strong>)</li>
                                 <li>3. Verá a todos los arqueros de esa paca y puede anotar para cualquiera</li>
                             </ol>
