@@ -6,6 +6,8 @@ type MatchRow = {
     archer2_id: string | null;
     archer1_seed: number | null;
     archer2_seed: number | null;
+    archer1_set_points: number;
+    archer2_set_points: number;
     status: string;
     winner_id: string | null;
     target_id: string | null;
@@ -54,7 +56,7 @@ export async function resolvePendingByeAdvances(
     for (let pass = 0; pass < totalRounds + 2; pass++) {
         const { data, error } = await supabase
             .from("elimination_matches")
-            .select("id, round_number, match_position, archer1_id, archer2_id, archer1_seed, archer2_seed, status, winner_id, target_id")
+            .select("id, round_number, match_position, archer1_id, archer2_id, archer1_seed, archer2_seed, archer1_set_points, archer2_set_points, status, winner_id, target_id")
             .eq("bracket_id", bracketId);
 
         if (error) throw new Error(error.message);
@@ -68,6 +70,27 @@ export async function resolvePendingByeAdvances(
             .sort((a, b) => a.round_number - b.round_number || a.match_position - b.match_position);
 
         for (const match of orderedMatches) {
+            const hasBothArchers = Boolean(match.archer1_id && match.archer2_id);
+            const staleCompletedAutoMatch = hasBothArchers &&
+                match.status === "completed" &&
+                Boolean(match.winner_id) &&
+                match.archer1_set_points === 0 &&
+                match.archer2_set_points === 0;
+
+            if (staleCompletedAutoMatch) {
+                const { error: reopenError } = await supabase
+                    .from("elimination_matches")
+                    .update({
+                        status: "pending",
+                        winner_id: null,
+                    })
+                    .eq("id", match.id);
+
+                if (reopenError) throw new Error(reopenError.message);
+                changed = true;
+                continue;
+            }
+
             if (match.status === "completed" && match.winner_id) continue;
 
             const autoWinnerId = getAutoWinnerId(match);
@@ -118,6 +141,19 @@ export async function resolvePendingByeAdvances(
             const siblingArcherId = isOddPosition ? nextMatch.archer2_id : nextMatch.archer1_id;
             if (siblingArcherId && !nextMatch.target_id && match.target_id) {
                 updateData.target_id = match.target_id;
+            }
+
+            const nextArcher1Id = isOddPosition ? autoWinnerId : nextMatch.archer1_id;
+            const nextArcher2Id = isOddPosition ? nextMatch.archer2_id : autoWinnerId;
+            if (
+                nextArcher1Id &&
+                nextArcher2Id &&
+                (nextMatch.status === "completed" || nextMatch.winner_id)
+            ) {
+                updateData.status = "pending";
+                updateData.winner_id = null;
+                updateData.archer1_set_points = 0;
+                updateData.archer2_set_points = 0;
             }
 
             if (Object.keys(updateData).length > 0) {

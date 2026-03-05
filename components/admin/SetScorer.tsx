@@ -224,7 +224,7 @@ export function SetScorer({ match, onMatchUpdate }: SetScorerProps) {
 
         const { data: nextMatch } = await supabase
             .from("elimination_matches")
-            .select("id, archer1_id, archer2_id, target_id")
+            .select("id, archer1_id, archer2_id, target_id, status, winner_id")
             .eq("bracket_id", completedMatch.bracket_id)
             .eq("round_number", nextRound)
             .eq("match_position", nextMatchPosition)
@@ -232,9 +232,19 @@ export function SetScorer({ match, onMatchUpdate }: SetScorerProps) {
 
         if (nextMatch) {
             const isOddPosition = completedMatch.match_position % 2 === 1;
-            const updateData: Record<string, string> = isOddPosition ? { archer1_id: winnerId } : { archer2_id: winnerId };
+            const updateData: Record<string, string | null | number> = isOddPosition ? { archer1_id: winnerId } : { archer2_id: winnerId };
             const otherArcherId = isOddPosition ? nextMatch.archer2_id : nextMatch.archer1_id;
             if (otherArcherId && !nextMatch.target_id && completedMatch.target_id) updateData.target_id = completedMatch.target_id;
+
+            const nextArcher1Id = isOddPosition ? winnerId : nextMatch.archer1_id;
+            const nextArcher2Id = isOddPosition ? nextMatch.archer2_id : winnerId;
+            if (nextArcher1Id && nextArcher2Id && (nextMatch.status === "completed" || nextMatch.winner_id)) {
+                updateData.status = "pending";
+                updateData.winner_id = null;
+                updateData.archer1_set_points = 0;
+                updateData.archer2_set_points = 0;
+            }
+
             await supabase.from("elimination_matches").update(updateData).eq("id", nextMatch.id);
         }
 

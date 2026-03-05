@@ -80,9 +80,18 @@ interface GenerationResult {
 const hasSingleArcher = (match: Match) =>
     Boolean(match.archer1_id) !== Boolean(match.archer2_id);
 
+const hasStaleAutoWinner = (match: Match) =>
+    Boolean(match.archer1_id) &&
+    Boolean(match.archer2_id) &&
+    match.status === "completed" &&
+    Boolean(match.winner_id) &&
+    match.archer1_set_points === 0 &&
+    match.archer2_set_points === 0;
+
 const needsByeNormalization = (bracket: Bracket) =>
     bracket.matches.some((match) =>
-        hasSingleArcher(match) && (match.status !== "completed" || !match.winner_id)
+        (hasSingleArcher(match) && (match.status !== "completed" || !match.winner_id)) ||
+        hasStaleAutoWinner(match)
     );
 
 export default function BracketsPage() {
