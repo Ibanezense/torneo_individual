@@ -67,8 +67,9 @@ export function SetScorer({ match, onMatchUpdate }: SetScorerProps) {
     const [activeCursor, setActiveCursor] = useState(0);
     const [shootOffWinner, setShootOffWinner] = useState<1 | 2 | null>(null);
 
-    const isShootOff = match.status === "shootoff";
+    const isShootOff = match.status === "shootoff" || currentSetNumber === 99;
     const isCompleted = match.status === "completed";
+    const canEditCompleted = true;
     const arrowSlots = isShootOff ? 1 : 3;
 
     const confirmedSets = useMemo(
@@ -111,6 +112,21 @@ export function SetScorer({ match, onMatchUpdate }: SetScorerProps) {
                 setCurrentSetNumber(99);
                 setArcher1Arrows(cloneArrows(existingShootOff?.archer1_arrows, 1));
                 setArcher2Arrows(cloneArrows(existingShootOff?.archer2_arrows, 1));
+            } else if (match.status === "completed" && canEditCompleted) {
+                if (existingShootOff) {
+                    setCurrentSetNumber(99);
+                    setArcher1Arrows(cloneArrows(existingShootOff.archer1_arrows, 1));
+                    setArcher2Arrows(cloneArrows(existingShootOff.archer2_arrows, 1));
+                } else if (regulationSets.length > 0) {
+                    const lastSet = regulationSets[regulationSets.length - 1];
+                    setCurrentSetNumber(lastSet.set_number);
+                    setArcher1Arrows(cloneArrows(lastSet.archer1_arrows, 3));
+                    setArcher2Arrows(cloneArrows(lastSet.archer2_arrows, 3));
+                } else {
+                    setCurrentSetNumber(1);
+                    setArcher1Arrows([null, null, null]);
+                    setArcher2Arrows([null, null, null]);
+                }
             } else {
                 setCurrentSetNumber(regulationSets.length + 1);
                 setArcher1Arrows([null, null, null]);
@@ -127,10 +143,10 @@ export function SetScorer({ match, onMatchUpdate }: SetScorerProps) {
         return () => {
             cancelled = true;
         };
-    }, [match.id, match.status, supabase]);
+    }, [canEditCompleted, match.id, match.status, supabase]);
 
     const handleKeypadPress = (value: number) => {
-        if (isCompleted) return;
+        if (isCompleted && !canEditCompleted) return;
 
         const maxIndex = arrowSlots - 1;
         const cellIndex = Math.min(activeCursor, maxIndex);
@@ -156,13 +172,13 @@ export function SetScorer({ match, onMatchUpdate }: SetScorerProps) {
     };
 
     const handleCellClick = (archer: 1 | 2, index: number) => {
-        if (isCompleted) return;
+        if (isCompleted && !canEditCompleted) return;
         setActiveArcher(archer);
         setActiveCursor(index);
     };
 
     const handleDelete = () => {
-        if (isCompleted) return;
+        if (isCompleted && !canEditCompleted) return;
 
         const deleteFrom = (
             values: (number | null)[],
@@ -277,7 +293,7 @@ export function SetScorer({ match, onMatchUpdate }: SetScorerProps) {
     const isShootOffTie = isShootOff && allArrowsFilled && archer1Total === archer2Total;
 
     const handleConfirm = async () => {
-        if (!allArrowsFilled || isCompleted) return;
+        if (!allArrowsFilled || (isCompleted && !canEditCompleted)) return;
         setIsSaving(true);
 
         try {
@@ -308,8 +324,12 @@ export function SetScorer({ match, onMatchUpdate }: SetScorerProps) {
                     confirmed_at: new Date().toISOString(),
                 };
 
-                const nextArcher1Points = match.archer1_set_points + (winnerId === match.archer1_id ? 1 : 0);
-                const nextArcher2Points = match.archer2_set_points + (winnerId === match.archer2_id ? 1 : 0);
+                const previousShootOffLeft = shootOffSet?.archer1_set_result || 0;
+                const previousShootOffRight = shootOffSet?.archer2_set_result || 0;
+                const nextArcher1Points =
+                    match.archer1_set_points - previousShootOffLeft + (winnerId === match.archer1_id ? 1 : 0);
+                const nextArcher2Points =
+                    match.archer2_set_points - previousShootOffRight + (winnerId === match.archer2_id ? 1 : 0);
 
                 const { error: setError } = await supabase.from("sets").upsert({
                     match_id: match.id,
@@ -360,8 +380,13 @@ export function SetScorer({ match, onMatchUpdate }: SetScorerProps) {
                 archer2Points = 1;
             }
 
-            const nextArcher1Points = match.archer1_set_points + archer1Points;
-            const nextArcher2Points = match.archer2_set_points + archer2Points;
+            const editedSet = sets.find(
+                (setRow) => setRow.set_number === currentSetNumber && !setRow.is_shootoff
+            );
+            const previousArcher1Points = editedSet?.archer1_set_result || 0;
+            const previousArcher2Points = editedSet?.archer2_set_result || 0;
+            const nextArcher1Points = match.archer1_set_points - previousArcher1Points + archer1Points;
+            const nextArcher2Points = match.archer2_set_points - previousArcher2Points + archer2Points;
 
             let status: "in_progress" | "shootoff" | "completed" = "in_progress";
             let winnerId: string | null = null;
@@ -549,7 +574,7 @@ export function SetScorer({ match, onMatchUpdate }: SetScorerProps) {
                             </div>
                         )}
 
-                        {!isCompleted && (
+                        {(!isCompleted || canEditCompleted) && (
                             <div className="space-y-3 bg-sky-50/60 px-3 py-3">
                                 <div className="grid grid-cols-[1fr_auto_auto_auto_1fr] items-center gap-2">
                                     {renderArrowGroup(archer1Arrows, 1, true, arrowSlots)}
@@ -582,7 +607,7 @@ export function SetScorer({ match, onMatchUpdate }: SetScorerProps) {
                 </CardContent>
             </Card>
 
-            {isCompleted ? (
+            {isCompleted && (
                 <Card className="border-emerald-200 bg-emerald-50 shadow-md">
                     <CardContent className="py-6 text-center">
                         <div className="mb-3 inline-flex items-center justify-center rounded-full bg-white p-3 shadow-sm">
@@ -592,37 +617,35 @@ export function SetScorer({ match, onMatchUpdate }: SetScorerProps) {
                         <p className="font-medium text-emerald-700">Ganador: {match.winner?.first_name} {match.winner?.last_name}</p>
                     </CardContent>
                 </Card>
-            ) : (
-                <>
-                    <div className="grid grid-cols-3 gap-2">
-                        {KEYPAD_LAYOUT.flat().map((key) => (
-                            <button
-                                key={key}
-                                type="button"
-                                onClick={() => handleKeypadPress(key === "X" ? 11 : key === "M" ? 0 : parseInt(key, 10))}
-                                className={`h-14 rounded-lg border-b-4 text-2xl font-bold shadow-sm transition-transform active:scale-95 ${KEYPAD_COLORS[key]}`}
-                            >
-                                {key}
-                            </button>
-                        ))}
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2">
-                        <Button onClick={handleDelete} variant="outline" className="h-12 border-slate-300 text-slate-600 hover:bg-slate-100">
-                            <Eraser className="mr-2 h-5 w-5" />
-                            Borrar Flecha
-                        </Button>
-                        <Button
-                            onClick={handleConfirm}
-                            disabled={!allArrowsFilled || (isShootOffTie && shootOffWinner === null) || isSaving}
-                            className="h-12 bg-green-600 text-lg font-bold shadow-md shadow-green-900/20 hover:bg-green-700 disabled:opacity-50"
-                        >
-                            {isSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Check className="mr-2 h-5 w-5" />}
-                            {isShootOff ? "Confirmar Shoot-off" : "Confirmar Set"}
-                        </Button>
-                    </div>
-                </>
             )}
+
+            <div className="grid grid-cols-3 gap-2">
+                {KEYPAD_LAYOUT.flat().map((key) => (
+                    <button
+                        key={key}
+                        type="button"
+                        onClick={() => handleKeypadPress(key === "X" ? 11 : key === "M" ? 0 : parseInt(key, 10))}
+                        className={`h-14 rounded-lg border-b-4 text-2xl font-bold shadow-sm transition-transform active:scale-95 ${KEYPAD_COLORS[key]}`}
+                    >
+                        {key}
+                    </button>
+                ))}
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+                <Button onClick={handleDelete} variant="outline" className="h-12 border-slate-300 text-slate-600 hover:bg-slate-100">
+                    <Eraser className="mr-2 h-5 w-5" />
+                    Borrar Flecha
+                </Button>
+                <Button
+                    onClick={handleConfirm}
+                    disabled={!allArrowsFilled || (isShootOffTie && shootOffWinner === null) || isSaving}
+                    className="h-12 bg-green-600 text-lg font-bold shadow-md shadow-green-900/20 hover:bg-green-700 disabled:opacity-50"
+                >
+                    {isSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Check className="mr-2 h-5 w-5" />}
+                    {isShootOff ? "Confirmar Shoot-off" : "Confirmar Set"}
+                </Button>
+            </div>
         </div>
     );
 }

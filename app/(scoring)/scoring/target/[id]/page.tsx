@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -57,8 +57,10 @@ interface TargetData {
 
 export default function TargetScoringPage() {
     const params = useParams();
+    const searchParams = useSearchParams();
     const router = useRouter();
     const targetId = params.id as string;
+    const isAdminMode = searchParams.get("admin") === "1";
     const supabase = createClient();
 
     const [isLoading, setIsLoading] = useState(true);
@@ -174,7 +176,7 @@ export default function TargetScoringPage() {
     }, [fetchTargetData]);
 
     const handleArcherClick = (assignmentId: string) => {
-        router.push(`/scoring/${assignmentId}?targetId=${targetId}`);
+        router.push(`/scoring/${assignmentId}?targetId=${targetId}${isAdminMode ? "&admin=1" : ""}`);
     };
 
     const handleSummaryClick = () => {
@@ -238,11 +240,11 @@ export default function TargetScoringPage() {
                     return (
                         <div
                             key={assignment.id}
-                            onClick={() => !isFinished && handleArcherClick(assignment.id)}
+                            onClick={() => (isAdminMode || !isFinished) && handleArcherClick(assignment.id)}
                             className={`
                                 overflow-hidden rounded-xl bg-white shadow-sm border-2 transition-all
                                 ${isFinished
-                                    ? "border-emerald-500 bg-emerald-50/50 cursor-default"
+                                    ? `border-emerald-500 bg-emerald-50/50 ${isAdminMode ? "active:scale-[0.99] cursor-pointer" : "cursor-default"}`
                                     : isConfirmed
                                         ? "border-green-500 active:scale-[0.99]"
                                         : "border-transparent active:scale-[0.99]"

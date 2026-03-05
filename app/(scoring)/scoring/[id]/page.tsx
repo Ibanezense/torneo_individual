@@ -61,6 +61,7 @@ export default function ScoringPage() {
     const router = useRouter();
     const assignmentId = params.id as string;
     const targetId = searchParams.get("targetId");
+    const isAdminMode = searchParams.get("admin") === "1";
     const supabase = createClient();
 
     const [isLoading, setIsLoading] = useState(true);
@@ -75,6 +76,7 @@ export default function ScoringPage() {
     const [isSaving, setIsSaving] = useState(false);
     const [cursor, setCursor] = useState(0);
     const scrollRef = useRef<HTMLDivElement>(null);
+    const isReadOnly = Boolean(assignment?.is_finished) && !isAdminMode;
 
     const getScoreColorClass = (val: number | null) => {
         if (val === null) return "text-slate-400";
@@ -179,7 +181,7 @@ export default function ScoringPage() {
     }, [fetchAssignment]);
 
     const handleKeypadPress = (key: string) => {
-        if (assignment?.is_finished) return;
+        if (isReadOnly) return;
 
         let val: number;
         if (key === "M") val = 0;
@@ -196,7 +198,7 @@ export default function ScoringPage() {
     };
 
     const handleConfirm = async () => {
-        if (!assignment || assignment.is_finished) return;
+        if (!assignment || isReadOnly) return;
 
         const { arrows_per_end, qualification_arrows } = assignment.tournament;
         const totalEnds = Math.ceil(qualification_arrows / arrows_per_end);
@@ -314,7 +316,7 @@ export default function ScoringPage() {
     };
 
     const handleDeleteArrow = () => {
-        if (assignment?.is_finished) return;
+        if (isReadOnly) return;
 
         if (cursor > 0) {
             const newArrows = [...arrows];
@@ -446,7 +448,7 @@ export default function ScoringPage() {
                                             <div key={slotIdx} className="p-0.5">
                                                 <button
                                                     onClick={() => {
-                                                        if (!assignment.is_finished) setCursor(slotIdx);
+                                                        if (!isReadOnly) setCursor(slotIdx);
                                                     }}
                                                     className={`
                                                         w-full aspect-square rounded flex items-center justify-center text-lg font-bold border
@@ -498,7 +500,7 @@ export default function ScoringPage() {
                             <button
                                 key={key}
                                 onClick={() => handleKeypadPress(key)}
-                                disabled={assignment.is_finished}
+                                disabled={isReadOnly}
                                 className={`
                                     h-14 rounded-lg text-2xl font-bold shadow-sm active:scale-95 transition-transform border-b-4
                                     ${KEYPAD_COLORS[key]} disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100
@@ -515,7 +517,7 @@ export default function ScoringPage() {
                         <Button
                             onClick={handleDeleteArrow}
                             variant="outline"
-                            disabled={assignment.is_finished}
+                            disabled={isReadOnly}
                             className="h-12 border-slate-300 text-slate-600 hover:bg-slate-100"
                         >
                             <Eraser className="w-5 h-5 mr-2" />
@@ -526,7 +528,7 @@ export default function ScoringPage() {
                         {arrows.every(a => a !== null) ? (
                             <Button
                                 onClick={handleConfirm}
-                                disabled={isSaving || assignment.is_finished}
+                                disabled={isSaving || isReadOnly}
                                 className="h-12 text-lg font-bold bg-green-600 hover:bg-green-700 shadow-md shadow-green-900/20"
                             >
                                 {isSaving ? <Loader2 className="animate-spin mr-2" /> : <CheckCircle2 className="mr-2 h-5 w-5" />}

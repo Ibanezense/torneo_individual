@@ -167,7 +167,7 @@ export default function ControlRoomPage() {
                             <TargetGrid
                                 targets={targets}
                                 onTargetClick={(targetId) => {
-                                    router.push(`/scoring/target/${targetId}`);
+                                    router.push(`/scoring/target/${targetId}?admin=1`);
                                 }}
                             />
                         </CardContent>

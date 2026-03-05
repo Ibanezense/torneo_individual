@@ -362,13 +362,28 @@ export async function POST(
                 is_completed: false,
             });
 
-            // Get ALL non-bye matches for target assignment (all rounds)
-            const allNonByeMatches = processedMatches.filter(m => !m.isBye);
+            const totalRounds = Math.log2(generatedBracket.bracketSize);
 
-            // Create targets for ALL matches and map them
+            // Target assignment policy:
+            // - Round 1: only real duels (non-bye)
+            // - Rounds 2..(final-1): all matches
+            // - Final: all matches (usually 1)
+            // - Bronze: explicit extra match (if bracket size >= 4)
+            const earlyRoundMatches = processedMatches
+                .filter((match) =>
+                    (match.roundNumber === 1 && !match.isBye) ||
+                    (match.roundNumber > 1 && match.roundNumber < totalRounds)
+                )
+                .sort((a, b) => a.roundNumber - b.roundNumber || a.matchPosition - b.matchPosition);
+
+            const finalRoundMatches = processedMatches
+                .filter((match) => match.roundNumber === totalRounds)
+                .sort((a, b) => a.matchPosition - b.matchPosition);
+
+            // Create targets and map them
             const matchTargetMap = new Map<string, string>(); // key: "round-position"
 
-            for (const match of allNonByeMatches) {
+            for (const match of earlyRoundMatches) {
                 const targetId = crypto.randomUUID();
                 targetInserts.push({
                     id: targetId,
@@ -381,14 +396,30 @@ export async function POST(
             }
 
             // Also create target for bronze medal match
-            const bronzeTargetId = crypto.randomUUID();
-            targetInserts.push({
-                id: bronzeTargetId,
-                target_number: nextTargetNumber,
-                distance,
-                current_status: "inactive",
-            });
-            nextTargetNumber++;
+            let bronzeTargetId: string | null = null;
+            if (generatedBracket.bracketSize >= 4) {
+                bronzeTargetId = crypto.randomUUID();
+                targetInserts.push({
+                    id: bronzeTargetId,
+                    target_number: nextTargetNumber,
+                    distance,
+                    current_status: "inactive",
+                });
+                nextTargetNumber++;
+            }
+
+            // Final targets go after bronze (requested ordering)
+            for (const match of finalRoundMatches) {
+                const targetId = crypto.randomUUID();
+                targetInserts.push({
+                    id: targetId,
+                    target_number: nextTargetNumber,
+                    distance,
+                    current_status: "inactive",
+                });
+                matchTargetMap.set(`${match.roundNumber}-${match.matchPosition}`, targetId);
+                nextTargetNumber++;
+            }
 
             // Insert matches with target assignments for ALL rounds
             const groupMatchInserts: typeof matchInserts = processedMatches.map((match) => {
@@ -412,15 +443,16 @@ export async function POST(
                     archer2_set_points: 0,
                     status: (isClosedMatch ? "completed" : "pending") as "completed" | "pending",
                     winner_id: isClosedMatch ? autoWinnerId : null,
-                    target_id: match.isBye
-                        ? null
-                        : (matchTargetMap.get(`${match.roundNumber}-${match.matchPosition}`) || null),
+                    target_id:
+                        match.roundNumber === 1 && match.isBye
+                            ? null
+                            : (matchTargetMap.get(`${match.roundNumber}-${match.matchPosition}`) || null),
                 };
             });
 
             // Add bronze medal match (round_number = 0 as special indicator)
             // Only add if bracket has semifinals (bracketSize >= 4)
-            if (generatedBracket.bracketSize >= 4) {
+            if (generatedBracket.bracketSize >= 4 && bronzeTargetId) {
                 groupMatchInserts.push({
                     id: crypto.randomUUID(),
                     bracket_id: bracketId,
@@ -436,8 +468,6 @@ export async function POST(
                     winner_id: null,
                     target_id: bronzeTargetId,
                 });
-            } else {
-                targetInserts.pop();
             }
 
             matchInserts.push(...groupMatchInserts);
@@ -450,7 +480,8 @@ export async function POST(
                 archerCount: archers.length,
                 bracketSize: generatedBracket.bracketSize,
                 matchCount: groupMatchInserts.length,
-                targetsAssigned: allNonByeMatches.length + (generatedBracket.bracketSize >= 4 ? 1 : 0),
+                targetsAssigned:
+                    earlyRoundMatches.length + finalRoundMatches.length + (generatedBracket.bracketSize >= 4 ? 1 : 0),
             });
         }
 
