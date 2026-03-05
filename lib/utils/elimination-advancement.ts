@@ -66,7 +66,6 @@ export async function resolvePendingByeAdvances(
         let changed = false;
 
         const orderedMatches = [...matches]
-            .filter((match) => match.round_number > 0)
             .sort((a, b) => a.round_number - b.round_number || a.match_position - b.match_position);
 
         for (const match of orderedMatches) {
@@ -112,6 +111,7 @@ export async function resolvePendingByeAdvances(
                 continue;
             }
 
+            if (match.round_number === 0) continue;
             if (match.status === "completed" && match.winner_id) continue;
 
             const autoWinnerId = getAutoWinnerId(match);
@@ -195,8 +195,15 @@ export async function resolvePendingByeAdvances(
             if (bronzeWinnerId) {
                 const semifinalMatches = matches.filter((match) => match.round_number === semifinalRound);
                 const semifinalsReady = semifinalMatches.length >= 2 && semifinalMatches.every((match) => match.status === "completed");
+                const semifinalMatch1 = matchByKey.get(`${semifinalRound}-1`);
+                const semifinalMatch2 = matchByKey.get(`${semifinalRound}-2`);
+                const semifinal1WasBye = Boolean(semifinalMatch1 && getAutoWinnerId(semifinalMatch1));
+                const semifinal2WasBye = Boolean(semifinalMatch2 && getAutoWinnerId(semifinalMatch2));
+                const bronzeMissingFromByeSide =
+                    (!bronzeMatch.archer1_id && semifinal1WasBye) ||
+                    (!bronzeMatch.archer2_id && semifinal2WasBye);
 
-                if (semifinalsReady) {
+                if (semifinalsReady && bronzeMissingFromByeSide) {
                     const { error: bronzeError } = await supabase
                         .from("elimination_matches")
                         .update({
