@@ -363,6 +363,7 @@ export async function POST(
             });
 
             const totalRounds = Math.log2(generatedBracket.bracketSize);
+            const shouldCreateBronzeMatch = generatedBracket.bracketSize >= 4 && archers.length >= 4;
 
             // Target assignment policy:
             // - Round 1: only real duels (non-bye)
@@ -397,7 +398,7 @@ export async function POST(
 
             // Also create target for bronze medal match
             let bronzeTargetId: string | null = null;
-            if (generatedBracket.bracketSize >= 4) {
+            if (shouldCreateBronzeMatch) {
                 bronzeTargetId = crypto.randomUUID();
                 targetInserts.push({
                     id: bronzeTargetId,
@@ -451,7 +452,7 @@ export async function POST(
 
             // Add bronze medal match (round_number = 0 as special indicator)
             // Only add if bracket has semifinals (bracketSize >= 4)
-            if (generatedBracket.bracketSize >= 4 && bronzeTargetId) {
+            if (shouldCreateBronzeMatch && bronzeTargetId) {
                 groupMatchInserts.push({
                     id: crypto.randomUUID(),
                     bracket_id: bracketId,
@@ -480,7 +481,7 @@ export async function POST(
                 bracketSize: generatedBracket.bracketSize,
                 matchCount: groupMatchInserts.length,
                 targetsAssigned:
-                    earlyRoundMatches.length + finalRoundMatches.length + (generatedBracket.bracketSize >= 4 ? 1 : 0),
+                    earlyRoundMatches.length + finalRoundMatches.length + (shouldCreateBronzeMatch ? 1 : 0),
             });
         }
 

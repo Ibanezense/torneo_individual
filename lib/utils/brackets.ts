@@ -41,6 +41,8 @@ export interface GeneratedBracket {
  * Get the next power of 2 that can fit all archers
  */
 export function getNextBracketSize(archerCount: number): number {
+    if (archerCount <= 2) return 2;
+    if (archerCount <= 4) return 4;
     if (archerCount <= 8) return 8;
     if (archerCount <= 16) return 16;
     if (archerCount <= 32) return 32;

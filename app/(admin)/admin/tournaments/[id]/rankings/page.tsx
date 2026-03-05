@@ -353,6 +353,34 @@ export default function RankingsPage() {
                 }
             }
 
+            if ((!bronzeMatch || bronzeMatch.status !== "completed" || !bronzeMatch.winner_id) && semifinalRound >= 1) {
+                const semifinalLosers = matches
+                    .filter((match) => match.round_number === semifinalRound && match.status === "completed" && Boolean(match.winner_id))
+                    .map((match) => (match.archer1_id === match.winner_id ? match.archer2 : match.archer1))
+                    .filter((archer): archer is MatchArcher => Boolean(archer));
+
+                const uniqueSemifinalLosers = Array.from(
+                    new Map(semifinalLosers.map((archer) => [archer.id, archer])).values()
+                );
+
+                if (uniqueSemifinalLosers.length === 1) {
+                    const bronzeByBye = uniqueSemifinalLosers[0];
+                    if (!results.some((result) => result.archerId === bronzeByBye.id && result.ageCategory === bracket.category)) {
+                        results.push({
+                            archerId: bronzeByBye.id,
+                            firstName: bronzeByBye.first_name,
+                            lastName: bronzeByBye.last_name,
+                            club: bronzeByBye.club,
+                            ageCategory: bracket.category,
+                            gender: bronzeByBye.gender,
+                            distance: bronzeByBye.distance,
+                            position: 3,
+                            eliminatedRound: "Bronce (bye semifinal)",
+                        });
+                    }
+                }
+            }
+
             const completedMatches = matches.filter((match) =>
                 match.status === "completed" &&
                 match.winner_id &&
