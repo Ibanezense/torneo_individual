@@ -222,81 +222,37 @@ export async function POST(
                 continue;
             }
 
-            let archerIndex = 0;
-            let targetIndex = 0;
-
-            if (availableTargets[0].used > 0 && availableTargets[0].used < 4) {
-                const partialTarget = availableTargets[0];
-                const slotsToFill = 4 - partialTarget.used;
-                const archersForPartial = Math.min(slotsToFill, archerCount);
-
-                for (let i = 0; i < archersForPartial; i++) {
-                    const pos = targetUsage.get(partialTarget.target.id) || 0;
-                    assignments.push({
-                        tournament_id: tournamentId,
-                        archer_id: shuffledArchers[archerIndex].id,
-                        target_id: partialTarget.target.id,
-                        position: positions[pos],
-                        turn: turns[pos],
-                        access_code: buildAssignmentAccessCode(
-                            tournamentId,
-                            partialTarget.target.target_number,
-                            positions[pos]
-                        ),
-                    });
-                    targetUsage.set(partialTarget.target.id, pos + 1);
-                    archerIndex++;
-                }
-                targetIndex = 1;
-            }
-
-            const remainingArchers = archerCount - archerIndex;
-            const emptyTargets = availableTargets.slice(targetIndex).filter((item) => item.used === 0);
-
-            if (remainingArchers > 0 && emptyTargets.length > 0) {
-                const targetsNeeded = Math.ceil(remainingArchers / 4);
-                const targetsToUse = Math.min(targetsNeeded, emptyTargets.length);
-                const basePerTarget = Math.floor(remainingArchers / targetsToUse);
-                const remainder = remainingArchers % targetsToUse;
-
-                const distribution: number[] = [];
-                for (let i = 0; i < targetsToUse; i++) {
-                    distribution.push(basePerTarget + (i < remainder ? 1 : 0));
+            for (const archer of shuffledArchers) {
+                const targetEntry = availableTargets.find((entry) => entry.used < 4);
+                if (!targetEntry) {
+                    unassignedArchers.push(archer);
+                    continue;
                 }
 
-                for (let targetIdx = 0; targetIdx < targetsToUse; targetIdx++) {
-                    const targetInfo = emptyTargets[targetIdx];
-                    const archersForThis = distribution[targetIdx];
+                const slotIndex = targetEntry.used;
+                const position = positions[slotIndex];
+                const turn = turns[slotIndex];
 
-                    for (
-                        let assignmentIdx = 0;
-                        assignmentIdx < archersForThis && archerIndex < shuffledArchers.length;
-                        assignmentIdx++
-                    ) {
-                        const pos = targetUsage.get(targetInfo.target.id) || 0;
-                        assignments.push({
-                            tournament_id: tournamentId,
-                            archer_id: shuffledArchers[archerIndex].id,
-                            target_id: targetInfo.target.id,
-                            position: positions[pos],
-                            turn: turns[pos],
-                            access_code: buildAssignmentAccessCode(
-                                tournamentId,
-                                targetInfo.target.target_number,
-                                positions[pos]
-                            ),
-                        });
-                        targetUsage.set(targetInfo.target.id, pos + 1);
-                        archerIndex++;
-                    }
+                if (!position || !turn) {
+                    unassignedArchers.push(archer);
+                    continue;
                 }
-            }
 
-            if (archerIndex < shuffledArchers.length) {
-                console.warn(
-                    `${shuffledArchers.length - archerIndex} archers unassigned at ${distance}m - not enough targets`
-                );
-                unassignedArchers.push(...shuffledArchers.slice(archerIndex));
+                assignments.push({
+                    tournament_id: tournamentId,
+                    archer_id: archer.id,
+                    target_id: targetEntry.target.id,
+                    position,
+                    turn,
+                    access_code: buildAssignmentAccessCode(
+                        tournamentId,
+                        targetEntry.target.target_number,
+                        position
+                    ),
+                });
+
+                targetEntry.used += 1;
+                targetUsage.set(targetEntry.target.id, targetEntry.used);
             }
         }
 
