@@ -14,6 +14,19 @@ interface Tournament {
     status: string;
 }
 
+function formatTournamentDate(dateValue: string) {
+    const isoDateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateValue);
+    if (isoDateMatch) {
+        const [, year, month, day] = isoDateMatch;
+        const localDate = new Date(Number(year), Number(month) - 1, Number(day));
+        return localDate.toLocaleDateString("es-ES");
+    }
+
+    const parsedDate = new Date(dateValue);
+    if (Number.isNaN(parsedDate.getTime())) return dateValue;
+    return parsedDate.toLocaleDateString("es-ES");
+}
+
 export default function LiveTournamentLayout({
     children,
 }: {
@@ -95,7 +108,7 @@ export default function LiveTournamentLayout({
                         <div className="min-w-0">
                             <h1 className="text-lg font-bold truncate">{tournament.name}</h1>
                             <p className="text-xs text-slate-400 truncate">
-                                {tournament.location} • {new Date(tournament.date).toLocaleDateString("es-ES")}
+                                {tournament.location} • {formatTournamentDate(tournament.date)}
                             </p>
                         </div>
                         {tournament.status === "in_progress" && (
