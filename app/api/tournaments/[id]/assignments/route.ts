@@ -47,6 +47,19 @@ export async function POST(
             return NextResponse.json({ error: "Torneo no encontrado" }, { status: 404 });
         }
 
+        const { data: participantRows, error: participantsError } = await supabase
+            .from("tournament_participants")
+            .select("archer_id")
+            .eq("tournament_id", tournamentId);
+
+        if (participantsError) {
+            return NextResponse.json({ error: "Error al obtener participantes del torneo" }, { status: 500 });
+        }
+
+        const participantIds = new Set(
+            (participantRows || []).map((row: { archer_id: string }) => row.archer_id)
+        );
+
         const body = (await request.json()) as {
             archerIds?: string[];
             assignments?: ManualAssignmentInput[];
@@ -66,6 +79,20 @@ export async function POST(
                     )
             );
 
+            const invalidAssignmentArchers = desiredAssignments
+                .map((assignment) => assignment.archer_id)
+                .filter((archerId) => !participantIds.has(archerId));
+
+            if (invalidAssignmentArchers.length > 0) {
+                return NextResponse.json(
+                    {
+                        error: "Hay asignaciones con arqueros que no fueron marcados como participantes del torneo.",
+                        invalidArcherIds: Array.from(new Set(invalidAssignmentArchers)),
+                    },
+                    { status: 400 }
+                );
+            }
+
             const persistResult = await reconcileAssignments(supabase, tournamentId, desiredAssignments);
             if (!persistResult.success) {
                 return NextResponse.json({ error: persistResult.error }, { status: 400 });
@@ -83,6 +110,24 @@ export async function POST(
 
         if (archerIds.length === 0) {
             return NextResponse.json({ error: "No se seleccionaron arqueros" }, { status: 400 });
+        }
+
+        if (participantIds.size === 0) {
+            return NextResponse.json(
+                { error: "No hay participantes marcados para este torneo. Seleccionalos en la pantalla de Arqueros." },
+                { status: 400 }
+            );
+        }
+
+        const nonParticipantIds = archerIds.filter((archerId) => !participantIds.has(archerId));
+        if (nonParticipantIds.length > 0) {
+            return NextResponse.json(
+                {
+                    error: "Incluiste arqueros que no fueron marcados como participantes del torneo.",
+                    invalidArcherIds: nonParticipantIds,
+                },
+                { status: 400 }
+            );
         }
 
         const { data: archers, error: archersError } = await supabase

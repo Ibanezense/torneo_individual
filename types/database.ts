@@ -141,6 +141,13 @@ export interface QualificationRound {
     updated_at: string;
 }
 
+export interface TournamentParticipant {
+    tournament_id: string;
+    archer_id: string;
+    created_at: string;
+    created_by: string | null;
+}
+
 export interface EliminationBracket {
     id: string;
     tournament_id: string;

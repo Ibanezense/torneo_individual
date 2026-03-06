@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ArrowLeft, Users, Shield, Target, Filter, CheckCircle2 } from "lucide-react";
+import { ArrowLeft, Users, Shield, Target, Filter, CheckCircle2, Save } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -32,6 +32,18 @@ interface Tournament {
     divisions?: TournamentDivision[] | null;
 }
 
+interface ParticipantRow {
+    archer_id: string;
+}
+
+function areSetsEqual(left: Set<string>, right: Set<string>) {
+    if (left.size !== right.size) return false;
+    for (const value of left) {
+        if (!right.has(value)) return false;
+    }
+    return true;
+}
+
 export default function TournamentArchersPage() {
     const params = useParams();
     const id = params.id as string;
@@ -41,6 +53,9 @@ export default function TournamentArchersPage() {
     const [tournament, setTournament] = useState<Tournament | null>(null);
     const [archers, setArchers] = useState<Archer[]>([]);
     const [assignedIds, setAssignedIds] = useState<Set<string>>(new Set());
+    const [participantIds, setParticipantIds] = useState<Set<string>>(new Set());
+    const [initialParticipantIds, setInitialParticipantIds] = useState<Set<string>>(new Set());
+    const [isSavingParticipants, setIsSavingParticipants] = useState(false);
     const [searchTerm, setSearchTerm] = useState("");
 
     const loadData = useCallback(async () => {
@@ -73,6 +88,18 @@ export default function TournamentArchersPage() {
             setAssignedIds(
                 new Set((assignmentsData || []).map((assignment: { archer_id: string }) => assignment.archer_id))
             );
+
+            const { data: participantsData, error: participantsError } = await supabase
+                .from("tournament_participants")
+                .select("archer_id")
+                .eq("tournament_id", id);
+
+            if (participantsError) throw participantsError;
+            const nextParticipantIds = new Set(
+                ((participantsData || []) as ParticipantRow[]).map((participant) => participant.archer_id)
+            );
+            setParticipantIds(nextParticipantIds);
+            setInitialParticipantIds(nextParticipantIds);
         } catch (error) {
             console.error(error);
             toast.error("Error cargando datos");
@@ -105,10 +132,72 @@ export default function TournamentArchersPage() {
         );
     });
 
+    const toggleParticipant = (archerId: string) => {
+        setParticipantIds((prev) => {
+            const next = new Set(prev);
+            if (next.has(archerId)) next.delete(archerId);
+            else next.add(archerId);
+            return next;
+        });
+    };
+
+    const selectFiltered = () => {
+        setParticipantIds((prev) => {
+            const next = new Set(prev);
+            for (const archer of filteredArchers) {
+                next.add(archer.id);
+            }
+            return next;
+        });
+    };
+
+    const clearFiltered = () => {
+        setParticipantIds((prev) => {
+            const next = new Set(prev);
+            for (const archer of filteredArchers) {
+                next.delete(archer.id);
+            }
+            return next;
+        });
+    };
+
+    const handleSaveParticipants = async () => {
+        setIsSavingParticipants(true);
+        try {
+            const selectedIds = Array.from(participantIds);
+            const { error: deleteError } = await supabase
+                .from("tournament_participants")
+                .delete()
+                .eq("tournament_id", id);
+
+            if (deleteError) throw deleteError;
+
+            if (selectedIds.length > 0) {
+                const { error: insertError } = await supabase
+                    .from("tournament_participants")
+                    .insert(selectedIds.map((archerId) => ({ tournament_id: id, archer_id: archerId })));
+
+                if (insertError) throw insertError;
+            }
+
+            setInitialParticipantIds(new Set(selectedIds));
+            toast.success("Participantes actualizados");
+        } catch (error) {
+            console.error(error);
+            toast.error("No se pudieron guardar los participantes");
+        } finally {
+            setIsSavingParticipants(false);
+        }
+    };
+
+    const hasParticipantChanges = !areSetsEqual(participantIds, initialParticipantIds);
+
+    const assignedParticipants = Array.from(participantIds).filter((archerId) => assignedIds.has(archerId)).length;
     const stats = {
         total: archers.length,
-        assigned: assignedIds.size,
-        unassigned: archers.length - assignedIds.size,
+        participants: participantIds.size,
+        assigned: assignedParticipants,
+        unassigned: participantIds.size - assignedParticipants,
     };
 
     return (
@@ -151,8 +240,8 @@ export default function TournamentArchersPage() {
                                 <Target className="h-6 w-6 text-emerald-700" />
                             </div>
                             <div>
-                                <p className="text-xs text-slate-500 uppercase tracking-wider font-bold">Asignados</p>
-                                <p className="text-2xl font-black text-slate-900">{stats.assigned}</p>
+                                <p className="text-xs text-slate-500 uppercase tracking-wider font-bold">Participantes</p>
+                                <p className="text-2xl font-black text-slate-900">{stats.participants}</p>
                             </div>
                         </div>
                         <div className="bg-white border-2 border-amber-200 rounded-xl p-4 flex items-center gap-4 shadow-sm">
@@ -160,7 +249,7 @@ export default function TournamentArchersPage() {
                                 <Shield className="h-6 w-6 text-amber-700" />
                             </div>
                             <div>
-                                <p className="text-xs text-slate-500 uppercase tracking-wider font-bold">Pendientes</p>
+                                <p className="text-xs text-slate-500 uppercase tracking-wider font-bold">Participantes sin paca</p>
                                 <p className="text-2xl font-black text-slate-900">{stats.unassigned}</p>
                             </div>
                         </div>
@@ -198,22 +287,55 @@ export default function TournamentArchersPage() {
                 </div>
 
                 <Card className="border-2 border-slate-200 shadow-sm overflow-hidden">
-                    <CardHeader className="bg-slate-50 border-b border-slate-200 flex flex-row items-center justify-between pb-4">
-                        <div className="space-y-1">
-                            <CardTitle className="text-xl font-bold text-slate-800">Padron de Arqueros</CardTitle>
-                            <CardDescription className="text-slate-500">
-                                Listado completo de atletas registrados
-                            </CardDescription>
+                    <CardHeader className="bg-slate-50 border-b border-slate-200 space-y-4">
+                        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                            <div className="space-y-1">
+                                <CardTitle className="text-xl font-bold text-slate-800">Padron de Arqueros</CardTitle>
+                                <CardDescription className="text-slate-500">
+                                    Marca participantes del torneo. Solo ellos apareceran en asignacion de pacas.
+                                </CardDescription>
+                            </div>
+                            <div className="relative w-full md:w-72">
+                                <input
+                                    type="text"
+                                    placeholder="Buscar nombre o club..."
+                                    className="w-full pl-9 pr-4 py-2.5 bg-white border-2 border-slate-300 rounded-lg text-sm font-medium focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                    value={searchTerm}
+                                    onChange={(e) => setSearchTerm(e.target.value)}
+                                />
+                                <Filter className="absolute left-3 top-3 h-4 w-4 text-slate-400" />
+                            </div>
                         </div>
-                        <div className="relative w-64">
-                            <input
-                                type="text"
-                                placeholder="Buscar nombre o club..."
-                                className="w-full pl-9 pr-4 py-2.5 bg-white border-2 border-slate-300 rounded-lg text-sm font-medium focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                value={searchTerm}
-                                onChange={(e) => setSearchTerm(e.target.value)}
-                            />
-                            <Filter className="absolute left-3 top-3 h-4 w-4 text-slate-400" />
+                        <div className="flex flex-wrap items-center gap-2">
+                            <Button type="button" variant="outline" size="sm" onClick={selectFiltered}>
+                                Seleccionar filtrados
+                            </Button>
+                            <Button type="button" variant="outline" size="sm" onClick={clearFiltered}>
+                                Limpiar filtrados
+                            </Button>
+                            <Button
+                                type="button"
+                                size="sm"
+                                onClick={handleSaveParticipants}
+                                disabled={isSavingParticipants || !hasParticipantChanges}
+                            >
+                                {isSavingParticipants ? (
+                                    <span className="inline-flex items-center gap-2">
+                                        <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white border-b-transparent" />
+                                        Guardando...
+                                    </span>
+                                ) : (
+                                    <span className="inline-flex items-center gap-2">
+                                        <Save className="h-4 w-4" />
+                                        Guardar participantes
+                                    </span>
+                                )}
+                            </Button>
+                            {hasParticipantChanges && (
+                                <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-700">
+                                    Cambios sin guardar
+                                </Badge>
+                            )}
                         </div>
                     </CardHeader>
                     <CardContent className="p-0">
@@ -228,12 +350,14 @@ export default function TournamentArchersPage() {
                                             <TableHead className="font-bold text-slate-700">Genero</TableHead>
                                             <TableHead className="font-bold text-slate-700">Division</TableHead>
                                             <TableHead className="font-bold text-slate-700 text-center">Distancia</TableHead>
-                                            <TableHead className="font-bold text-slate-700 text-center">Estado</TableHead>
+                                            <TableHead className="font-bold text-slate-700 text-center">Participa</TableHead>
+                                            <TableHead className="font-bold text-slate-700 text-center">Asignacion</TableHead>
                                             <TableHead className="font-bold text-slate-700 text-center">Acciones</TableHead>
                                         </TableRow>
                                     </TableHeader>
                                     <TableBody>
                                         {filteredArchers.map((archer) => {
+                                            const isParticipant = participantIds.has(archer.id);
                                             const isAssigned = assignedIds.has(archer.id);
                                             return (
                                                 <TableRow
@@ -265,9 +389,23 @@ export default function TournamentArchersPage() {
                                                         </span>
                                                     </TableCell>
                                                     <TableCell className="text-center">
-                                                        {isAssigned ? (
+                                                        <input
+                                                            type="checkbox"
+                                                            className="h-4 w-4 cursor-pointer accent-blue-600"
+                                                            checked={isParticipant}
+                                                            onChange={() => toggleParticipant(archer.id)}
+                                                            disabled={isSavingParticipants}
+                                                            aria-label={`Marcar participante ${archer.first_name} ${archer.last_name}`}
+                                                        />
+                                                    </TableCell>
+                                                    <TableCell className="text-center">
+                                                        {isAssigned && isParticipant ? (
                                                             <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-200 border-2 border-emerald-300 font-bold">
                                                                 <CheckCircle2 className="w-3.5 h-3.5 mr-1" /> Asignado
+                                                            </Badge>
+                                                        ) : isAssigned ? (
+                                                            <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-200 border-2 border-amber-300 font-bold">
+                                                                Fuera de lista
                                                             </Badge>
                                                         ) : (
                                                             <Badge variant="outline" className="text-slate-500 bg-slate-100 border-slate-300 font-medium">

@@ -33,6 +33,11 @@ interface AssignmentRow {
     turn: ShootingTurn;
 }
 
+interface TournamentParticipantRow {
+    archer_id: string;
+    archer: Archer | Archer[] | null;
+}
+
 function buildAssignmentAccessCode(
     _tournamentId: string,
     targetNumber: number,
@@ -60,6 +65,24 @@ export default function AssignmentsPage() {
     const fetchData = useCallback(async () => {
         setIsLoading(true);
 
+        const { data: participantsData, error: participantsError } = await supabase
+            .from("tournament_participants")
+            .select("archer_id, archer:archers(*)")
+            .eq("tournament_id", tournamentId);
+
+        if (participantsError) {
+            toast.error("Error cargando participantes");
+            setIsLoading(false);
+            return;
+        }
+
+        const participantRows = (participantsData || []) as TournamentParticipantRow[];
+        const selectedArchers = participantRows
+            .map((row) => (Array.isArray(row.archer) ? row.archer[0] : row.archer))
+            .filter((archer): archer is Archer => Boolean(archer))
+            .sort((a, b) => a.last_name.localeCompare(b.last_name));
+        const participantIds = new Set(participantRows.map((row) => row.archer_id));
+
         // Get targets
         const { data: targetsData } = await supabase
             .from("targets")
@@ -73,17 +96,12 @@ export default function AssignmentsPage() {
             .select("*, archer:archers(*)")
             .eq("tournament_id", tournamentId);
 
-        // Get all archers
-        const { data: archersData } = await supabase
-            .from("archers")
-            .select("*")
-            .order("last_name");
-
         // Build target assignments map
         const assignmentsByTarget = new Map<string, TargetAssignment[]>();
         const assignedArcherIds = new Set<string>();
 
         for (const assignment of (assignmentsData || []) as AssignmentRow[]) {
+            if (!participantIds.has(assignment.archer_id)) continue;
             if (!assignmentsByTarget.has(assignment.target_id)) {
                 assignmentsByTarget.set(assignment.target_id, []);
             }
@@ -105,11 +123,11 @@ export default function AssignmentsPage() {
         }));
 
         // Find unassigned archers
-        const unassigned = ((archersData || []) as Archer[]).filter((archer) => !assignedArcherIds.has(archer.id));
+        const unassigned = selectedArchers.filter((archer) => !assignedArcherIds.has(archer.id));
 
         setTargets(targetStructures);
         setUnassignedArchers(unassigned);
-        setAllArchers(archersData || []);
+        setAllArchers(selectedArchers);
         setIsLoading(false);
         setHasChanges(false);
     }, [supabase, tournamentId]);
@@ -292,6 +310,11 @@ export default function AssignmentsPage() {
     };
 
     const handleAutoGenerate = async () => {
+        if (allArchers.length === 0) {
+            toast.error("No hay participantes seleccionados para este torneo");
+            return;
+        }
+
         // Get selected archers (all that have matching distances)
         const tournamentDistances = new Set(targets.map(t => t.target.distance));
         const eligibleArchers = allArchers.filter(a => tournamentDistances.has(a.distance));
@@ -363,7 +386,7 @@ export default function AssignmentsPage() {
                     <div>
                         <h2 className="text-3xl font-bold tracking-tight">Asignar Arqueros</h2>
                         <p className="text-muted-foreground">
-                            Arrastra arqueros a las pacas o usa generación automática
+                            Arrastra participantes del torneo a las pacas o usa generación automática
                         </p>
                     </div>
                 </div>
@@ -410,14 +433,31 @@ export default function AssignmentsPage() {
                 </Card>
             ) : (
                 <>
-                    {/* Process each distance */}
-                    {Array.from(targetsByDistance.entries()).map(([distance, distanceTargets]) => (
-                        <div key={distance} className="space-y-4">
-                            <h3 className="text-xl font-semibold flex items-center gap-2">
-                                <Badge variant="default" className="text-lg px-3 py-1">{distance}m</Badge>
-                            </h3>
+                    {allArchers.length === 0 && (
+                        <Card>
+                            <CardContent className="py-10 text-center">
+                                <p className="text-muted-foreground mb-4">
+                                    No hay participantes seleccionados para este torneo.
+                                </p>
+                                <Button asChild variant="outline">
+                                    <Link href={`/admin/tournaments/${tournamentId}/archers`}>
+                                        Ir a seleccionar participantes
+                                    </Link>
+                                </Button>
+                            </CardContent>
+                        </Card>
+                    )}
 
-                            <div className="grid gap-4 lg:grid-cols-2">
+                    {allArchers.length > 0 && (
+                        <>
+                            {/* Process each distance */}
+                            {Array.from(targetsByDistance.entries()).map(([distance, distanceTargets]) => (
+                                <div key={distance} className="space-y-4">
+                                    <h3 className="text-xl font-semibold flex items-center gap-2">
+                                        <Badge variant="default" className="text-lg px-3 py-1">{distance}m</Badge>
+                                    </h3>
+
+                                    <div className="grid gap-4 lg:grid-cols-2">
                                 {/* Unassigned Archers for this distance */}
                                 <Card>
                                     <CardHeader className="pb-3">
@@ -514,7 +554,7 @@ export default function AssignmentsPage() {
                                                     ))}
                                                     {assignments.length === 0 && (
                                                         <p className="text-sm text-muted-foreground text-center py-2">
-                                                            Arrastra arqueros aquí
+                                                            Arrastra participantes aquí
                                                         </p>
                                                     )}
                                                 </div>
@@ -522,9 +562,11 @@ export default function AssignmentsPage() {
                                         </Card>
                                     ))}
                                 </div>
-                            </div>
-                        </div>
-                    ))}
+                                    </div>
+                                </div>
+                            ))}
+                        </>
+                    )}
                 </>
             )}
         </div>
